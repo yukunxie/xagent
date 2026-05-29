@@ -337,7 +337,7 @@
   <div class="connect-card">
     <div>
       <label>Server IP</label>
-      <input id="ip-input" type="text" value="127.0.0.1" placeholder="192.168.1.100" />
+      <input id="ip-input" type="text" placeholder="192.168.1.100" />
     </div>
     <p class="hint">端口从 10337 开始自动探测（最多 100 个）</p>
     <div id="connect-error"></div>
@@ -561,6 +561,7 @@ async function handleConnect() {
   }
 
   connectedIp = ip;
+  localStorage.setItem('xagent_last_ip', ip);  // remember for next visit
   ws = found.sock;
   setupWsHandlers();
   show('sessions');
@@ -777,6 +778,10 @@ $backBtn.addEventListener('click', () => {
 // ── Init ──────────────────────────────────────────────────────────────────
 $connectBtn.addEventListener('click', handleConnect);
 $ipInput.addEventListener('keydown', e => { if (e.key === 'Enter') handleConnect(); });
+
+// Pre-fill IP from last successful connection
+const _savedIp = localStorage.getItem('xagent_last_ip');
+if (_savedIp) $ipInput.value = _savedIp;
 
 show('connect');
 </script>
