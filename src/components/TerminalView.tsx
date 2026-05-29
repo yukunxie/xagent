@@ -99,13 +99,14 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
 
   // ── isActive: fit + focus when tab becomes visible ────────────────────────
   useEffect(() => {
-    if (!isActive || !fitRef.current) return;
-    // Give the browser one paint cycle to un-hide the container before measuring
+    if (!isActive) return;
+    // fitRef.current may be null on the very first render (main effect hasn't run yet).
+    // Still schedule the timer — by the time it fires (50 ms), fitRef will be set.
     const t = setTimeout(() => {
-      if (!containerRef.current) return;
+      if (!fitRef.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      fitRef.current?.fit();
+      fitRef.current.fit();
       termRef.current?.focus();
       const rows = termRef.current?.rows ?? 24;
       const cols = termRef.current?.cols ?? 80;
@@ -273,6 +274,10 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
       });
 
       const initTimer = setTimeout(() => syncSize(), 50);
+      // Also fire immediately — useEffect runs after React commit+paint, so container
+      // dimensions are already valid. This ensures PTY is sized before the process
+      // outputs its first line (preventing garbled text from col-count mismatch).
+      syncSize();
       let resizeTimer: ReturnType<typeof setTimeout> | null = null;
       const observer = new ResizeObserver((entries) => {
         const entry = entries[0];
