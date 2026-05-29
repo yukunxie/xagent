@@ -263,6 +263,13 @@
   /* xterm override: make it fill the container */
   .xterm { height: 100% !important; }
   .xterm-viewport { overflow-y: hidden !important; }
+  /* xterm uses -webkit-text-security:disc on its hidden textarea to prevent
+     autocomplete, but mobile browsers interpret this as a password field and
+     show the password keyboard / dot-masking UI. Override it to plain text. */
+  .xterm-helper-textarea {
+    -webkit-text-security: none !important;
+    autocomplete: off;
+  }
 
   /* ── Mobile virtual keyboard shortcuts bar ─────────────────────── */
   #mobile-kb {
@@ -724,6 +731,17 @@ function openTerminal(session, hMode) {
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open($termContainer);
   term.focus();
+
+  // Fix mobile: xterm sets -webkit-text-security:disc on its hidden textarea
+  // which makes iOS/Android show the password keyboard. Override to 'none'.
+  const xtermTextarea = $termContainer.querySelector('textarea.xterm-helper-textarea');
+  if (xtermTextarea) {
+    xtermTextarea.style.webkitTextSecurity = 'none';
+    xtermTextarea.setAttribute('autocomplete', 'off');
+    xtermTextarea.setAttribute('autocorrect', 'off');
+    xtermTextarea.setAttribute('autocapitalize', 'off');
+  }
+
   setTimeout(() => { fitAddon.fit(); sendAttach(session, hMode); }, 60);
 
   // Resize observer
@@ -762,12 +780,6 @@ function openTerminal(session, hMode) {
         term.write(bytes);
       } else if (msg.type === 'history_done') {
         loadingHistory = false;
-        if (msg.total_bytes > 0) {
-          const kb = Math.round(msg.total_bytes / 1024);
-          term.write(new TextEncoder().encode(
-            `\r\n\x1b[90m─── 历史回放完成 (${kb} KB) ───\x1b[0m\r\n`
-          ));
-        }
         setTimeout(() => term?.scrollToBottom(), 100);
       } else if (msg.type === 'terminal_size') {
         // Server tells us the actual PTY size (sent before history).
