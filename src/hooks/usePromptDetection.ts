@@ -10,8 +10,6 @@ const PATTERNS: Array<{ regex: RegExp; type: "yn" | "anykey" | "input" }> = [
   { regex: /\[y\/N\]\s*$/i, type: "yn" },
   { regex: /\(yes\/no\)\s*[?:]?\s*$/i, type: "yn" },
   { regex: /press any key/i, type: "anykey" },
-  { regex: /\?\s*$/, type: "input" },
-  { regex: /:\s*$/, type: "input" },
 ];
 
 const DEBOUNCE_MS = 300;

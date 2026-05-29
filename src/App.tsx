@@ -1,8 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { SessionInfo } from "./types";
 import { TabBar } from "./components/SessionList";
 import { TerminalView } from "./components/TerminalView";
@@ -12,6 +11,9 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const appWindowRef = useRef(getCurrentWindow());
+  const forceCloseRef = useRef(false); // skip confirmation on confirmed close
 
   useEffect(() => {
     invoke<SessionInfo[]>("list_sessions").then(setSessions);
@@ -27,15 +29,11 @@ export default function App() {
       }
     );
 
-    // Intercept window close — ask for confirmation
-    const appWindow = getCurrentWindow();
-    const unlistenClose = appWindow.onCloseRequested(async (event) => {
+    // Intercept window close — show React confirmation modal
+    const unlistenClose = appWindowRef.current.onCloseRequested((event) => {
+      if (forceCloseRef.current) return; // user confirmed — let it close
       event.preventDefault();
-      const ok = await confirm("确认关闭 xAgent？\n当前所有会话将终止。", {
-        title: "关闭确认",
-        kind: "warning",
-      });
-      if (ok) appWindow.destroy();
+      setShowCloseConfirm(true);
     });
 
     return () => {
@@ -84,7 +82,11 @@ export default function App() {
         onKill={handleKill}
       />
 
-      <div className="relative flex-1 min-h-0 overflow-hidden">
+      {/* pointer-events-none prevents xterm from eating modal clicks */}
+      <div
+        className="relative flex-1 min-h-0 overflow-hidden"
+        style={showCloseConfirm || showNew ? { pointerEvents: "none" } : undefined}
+      >
         {activeId ? (
           <TerminalView key={activeId} sessionId={activeId} />
         ) : (
@@ -95,6 +97,64 @@ export default function App() {
       {showNew && (
         <NewSessionModal onCreate={handleCreate} onClose={() => setShowNew(false)} />
       )}
+
+      {showCloseConfirm && (
+        <CloseConfirmModal
+          onConfirm={() => invoke("exit_app")}
+          onCancel={() => setShowCloseConfirm(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CloseConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 9999,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.65)", backdropFilter: "blur(4px)",
+      }}
+    >
+      <div
+        style={{
+          background: "#18181b", border: "1px solid #3f3f46",
+          borderRadius: "0.75rem", boxShadow: "0 25px 50px rgba(0,0,0,0.5)",
+          width: "20rem", padding: "1.5rem",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem" }}>
+          <span style={{ fontSize: "1.5rem" }}>⚠️</span>
+          <h2 style={{ color: "#f4f4f5", fontWeight: 600, fontSize: "0.9rem" }}>关闭 xAgent</h2>
+        </div>
+        <p style={{ color: "#a1a1aa", fontSize: "0.875rem", marginBottom: "1.5rem" }}>
+          当前所有会话将终止，确认关闭？
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.75rem" }}>
+          <button
+            autoFocus
+            onClick={onCancel}
+            style={{
+              padding: "0.5rem 1rem", fontSize: "0.875rem",
+              color: "#a1a1aa", background: "transparent", border: "none", cursor: "pointer",
+            }}
+          >
+            取消
+          </button>
+          <button
+            onClick={onConfirm}
+            style={{
+              padding: "0.5rem 1rem", fontSize: "0.875rem",
+              background: "#b91c1c", color: "#fff",
+              border: "none", borderRadius: "0.375rem", cursor: "pointer",
+            }}
+          >
+            确认关闭
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

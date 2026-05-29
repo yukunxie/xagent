@@ -54,13 +54,14 @@ export function TerminalView({ sessionId }: Props) {
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.open(containerRef.current);
-
+    term.focus(); // ensure keyboard input works immediately
     termRef.current = term;
     fitRef.current = fitAddon;
 
     // Fit and immediately sync PTY size so TUI apps render correctly
     const syncSize = () => {
       fitAddon.fit();
+      term.focus(); // fitAddon.fit() may steal focus; restore it immediately
       invoke("resize_session", {
         sessionId,
         rows: term.rows,
@@ -98,12 +99,17 @@ export function TerminalView({ sessionId }: Props) {
       term.writeln("\r\n\x1b[90m[process exited]\x1b[0m");
     });
 
-    // Resize both xterm and PTY when container resizes
-    const observer = new ResizeObserver(() => syncSize());
+    // Resize both xterm and PTY when container resizes (debounced to avoid focus thrash)
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const observer = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(syncSize, 150);
+    });
     observer.observe(containerRef.current);
 
     return () => {
       clearTimeout(initTimer);
+      if (resizeTimer) clearTimeout(resizeTimer);
       unlistenData.then((fn) => fn());
       unlistenExit.then((fn) => fn());
       observer.disconnect();
@@ -121,7 +127,7 @@ export function TerminalView({ sessionId }: Props) {
   };
 
   return (
-    <div className="absolute inset-0 overflow-hidden">
+    <div className="absolute inset-0 overflow-hidden" onClick={() => termRef.current?.focus()}>
       <div ref={containerRef} className="w-full h-full" />
       {prompt && (
         <PromptOverlay

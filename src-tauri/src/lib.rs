@@ -45,6 +45,11 @@ struct PtyExitEvent {
 }
 
 #[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 fn list_sessions(state: State<AppState>) -> Vec<SessionInfo> {
     state
         .sessions
@@ -216,6 +221,7 @@ pub fn run() {
             resize_session,
             write_to_session,
             kill_session,
+            exit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -44,7 +44,7 @@ export function PromptOverlay({ type, onSend, onDismiss }: Props) {
           >
             <input
               name="text"
-              autoFocus
+            autoFocus={false}
               className="px-2 py-1 text-sm bg-zinc-700 border border-zinc-500 rounded text-zinc-100 outline-none focus:border-zinc-400 w-48"
               placeholder="输入内容…"
             />
