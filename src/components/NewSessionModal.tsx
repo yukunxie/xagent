@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { HistoryMode } from "../types";
 
 const LAST_CWD_KEY  = "xagent:last_cwd";
 const LAST_HOST_KEY = "xagent:last_host";
@@ -11,6 +12,7 @@ interface RemoteSession {
   created_at: number;
   is_local: boolean;
   status: string;
+  buffer_bytes: number;
 }
 
 interface ScanResult {
@@ -19,8 +21,15 @@ interface ScanResult {
 }
 
 interface Props {
-  onCreate: (name: string, command: string, args: string[], cwd: string, wsUrl?: string, wsSessionId?: string) => void;
+  onCreate: (name: string, command: string, args: string[], cwd: string, wsUrl?: string, wsSessionId?: string, historyMode?: HistoryMode) => void;
   onClose: () => void;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 10 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  if (bytes >= 1024 * 1024)       return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024)               return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
 }
 
 const PRESETS = [
@@ -83,12 +92,13 @@ export function NewSessionModal({ onCreate, onClose }: Props) {
   const [cwd,                setCwd]                = useState(() => localStorage.getItem(LAST_CWD_KEY) ?? "");
 
   // remote fields
-  const [host,      setHost]      = useState(() => localStorage.getItem(LAST_HOST_KEY) ?? "127.0.0.1");
-  const [scanState, setScanState] = useState<"idle" | "scanning" | "found" | "failed">("idle");
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  const [rCmd,      setRCmd]      = useState("");
-  const [rName,     setRName]     = useState("");
-  const [rNameME,   setRNameME]   = useState(false);
+  const [host,        setHost]        = useState(() => localStorage.getItem(LAST_HOST_KEY) ?? "127.0.0.1");
+  const [scanState,   setScanState]   = useState<"idle" | "scanning" | "found" | "failed">("idle");
+  const [scanResult,  setScanResult]  = useState<ScanResult | null>(null);
+  const [historyModes, setHistoryModes] = useState<Record<string, HistoryMode>>({});
+  const [rCmd,        setRCmd]        = useState("");
+  const [rName,       setRName]       = useState("");
+  const [rNameME,     setRNameME]     = useState(false);
 
   const handleScan = async () => {
     const h = host.trim();
@@ -107,9 +117,10 @@ export function NewSessionModal({ onCreate, onClose }: Props) {
 
   const handleAttach = (rs: RemoteSession) => {
     if (!scanResult) return;
-    const wsUrl  = `ws://${host.trim()}:${scanResult.port}`;
-    const label  = `${host.trim()} · ${rs.command}`;
-    onCreate(label, rs.command, [], rs.cwd, wsUrl, rs.id);
+    const wsUrl    = `ws://${host.trim()}:${scanResult.port}`;
+    const label    = `${host.trim()} · ${rs.command}`;
+    const histMode = historyModes[rs.id] ?? (rs.buffer_bytes > 512 * 1024 ? "1M" : "all");
+    onCreate(label, rs.command, [], rs.cwd, wsUrl, rs.id, histMode);
   };
 
   const handleNewRemote = () => {
@@ -271,23 +282,41 @@ export function NewSessionModal({ onCreate, onClose }: Props) {
                 {scanResult.sessions.length > 0 && (
                   <div>
                     <p className="text-xs text-zinc-400 mb-2">选择接入已有会话：</p>
-                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
                       {scanResult.sessions.map((rs) => (
                         <div key={rs.id}
-                          className="flex items-center justify-between bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2">
-                          <div className="min-w-0">
-                            <span className="text-sm text-zinc-100 font-mono truncate block">{rs.command}</span>
-                            <span className={`text-xs ${rs.status === "running" ? "text-emerald-400" : "text-zinc-500"}`}>
-                              {rs.status === "running" ? "● 运行中" : "○ 已退出"}{rs.is_local ? " · 本地" : " · 远端"}{rs.cwd ? ` · ${rs.cwd}` : ""}
-                            </span>
+                          className="bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <span className="text-sm text-zinc-100 font-mono truncate block">{rs.command}</span>
+                              <span className={`text-xs ${rs.status === "running" ? "text-emerald-400" : "text-zinc-500"}`}>
+                                {rs.status === "running" ? "● 运行中" : "○ 已退出"}{rs.is_local ? " · 本地" : " · 远端"}{rs.cwd ? ` · ${rs.cwd}` : ""}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              {rs.buffer_bytes > 0 && (
+                                <select
+                                  value={historyModes[rs.id] ?? (rs.buffer_bytes > 512 * 1024 ? "1M" : "all")}
+                                  onChange={(e) => setHistoryModes(prev => ({ ...prev, [rs.id]: e.target.value as HistoryMode }))}
+                                  title={`历史数据：${formatBytes(rs.buffer_bytes)}`}
+                                  className="text-xs bg-zinc-700 border border-zinc-600 rounded px-1.5 py-1 text-zinc-300 outline-none cursor-pointer"
+                                >
+                                  <option value="all">全部 ({formatBytes(rs.buffer_bytes)})</option>
+                                  <option value="10M">最近 10 MB</option>
+                                  <option value="5M">最近 5 MB</option>
+                                  <option value="1M">最近 1 MB</option>
+                                  <option value="none">不同步</option>
+                                </select>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleAttach(rs)}
+                                className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded-md transition-colors"
+                              >
+                                接入
+                              </button>
+                            </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => handleAttach(rs)}
-                            className="ml-3 px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded-md transition-colors flex-shrink-0"
-                          >
-                            接入
-                          </button>
                         </div>
                       ))}
                     </div>

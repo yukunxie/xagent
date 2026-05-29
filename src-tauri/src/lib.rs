@@ -21,6 +21,40 @@ struct PtyMaster(Box<dyn MasterPty>);
 unsafe impl Send for PtyMaster {}
 unsafe impl Sync for PtyMaster {}
 
+// ─── Append-only output history buffer (max 50 MB) ───────────────────────────
+
+pub(crate) struct OutputBuffer {
+    data:        Vec<u8>,
+    base_offset: u64,  // absolute byte offset of data[0]
+}
+
+impl OutputBuffer {
+    fn new() -> Self { Self { data: Vec::new(), base_offset: 0 } }
+
+    fn total_written(&self) -> u64 { self.base_offset + self.data.len() as u64 }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+        const MAX: usize = 50 * 1024 * 1024;
+        if self.data.len() > MAX {
+            let trim = self.data.len() - MAX;
+            self.data.drain(..trim);
+            self.base_offset += trim as u64;
+        }
+    }
+
+    /// Bytes starting from an absolute byte offset (delta / reconnect).
+    fn slice_from(&self, abs_offset: u64) -> &[u8] {
+        let start = abs_offset.saturating_sub(self.base_offset) as usize;
+        if start >= self.data.len() { &[] } else { &self.data[start..] }
+    }
+
+    /// Last `n` bytes (for history-size preference).
+    fn last_n_bytes(&self, n: usize) -> &[u8] {
+        if n >= self.data.len() { &self.data } else { &self.data[self.data.len() - n..] }
+    }
+}
+
 // ─── Unified Session (local PTY + WS-attached) ───────────────────────────────
 
 pub(crate) struct Session {
@@ -33,6 +67,7 @@ pub(crate) struct Session {
     pub output_tx:  broadcast::Sender<String>,        // PTY output → all WS subscribers
     pub input_tx:   mpsc::UnboundedSender<Vec<u8>>,   // input → PTY writer task
     pub master:     Arc<Mutex<Option<PtyMaster>>>,    // for resize + kill
+    pub output_buf: Arc<Mutex<OutputBuffer>>,         // rolling PTY history (50 MB cap)
 }
 
 pub(crate) type Registry = Arc<Mutex<HashMap<String, Session>>>;
@@ -45,12 +80,13 @@ pub struct AppState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
-    pub id:         String,
-    pub command:    String,
-    pub cwd:        String,
-    pub status:     String,
-    pub created_at: u64,
-    pub is_local:   bool,
+    pub id:           String,
+    pub command:      String,
+    pub cwd:          String,
+    pub status:       String,
+    pub created_at:   u64,
+    pub is_local:     bool,
+    pub buffer_bytes: u64,  // total PTY bytes written (for client history-size prompt)
 }
 
 #[derive(Serialize, Clone)]
@@ -141,12 +177,13 @@ fn resume_remote_input(_state: State<AppState>, _session_id: String) {}
 
 fn session_to_info(s: &Session) -> SessionInfo {
     SessionInfo {
-        id:         s.id.clone(),
-        command:    s.command.clone(),
-        cwd:        s.cwd.clone(),
-        status:     if s.running.load(Ordering::Relaxed) { "running" } else { "exited" }.to_string(),
-        created_at: s.created_at,
-        is_local:   s.is_local,
+        id:           s.id.clone(),
+        command:      s.command.clone(),
+        cwd:          s.cwd.clone(),
+        status:       if s.running.load(Ordering::Relaxed) { "running" } else { "exited" }.to_string(),
+        created_at:   s.created_at,
+        is_local:     s.is_local,
+        buffer_bytes: s.output_buf.lock().unwrap().total_written(),
     }
 }
 
@@ -180,14 +217,16 @@ fn create_session(
 
     let (output_tx, _) = broadcast::channel::<String>(512);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let running = Arc::new(AtomicBool::new(true));
+    let running    = Arc::new(AtomicBool::new(true));
+    let output_buf = Arc::new(Mutex::new(OutputBuffer::new()));
 
-    // — Reader thread: PTY bytes → broadcast + Tauri events (local only) —
+    // — Reader thread: PTY bytes → output_buf + broadcast + Tauri events —
     let sid          = session_id.clone();
     let out_tx       = output_tx.clone();
     let running_upd  = Arc::clone(&running);
     let master_keep  = Arc::clone(&master);
     let app_reader   = app.clone();
+    let buf_writer   = Arc::clone(&output_buf);
 
     std::thread::spawn(move || {
         let _keep = master_keep; // keeps ConPTY alive until thread exits
@@ -199,6 +238,8 @@ fn create_session(
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    // Append to history buffer first
+                    buf_writer.lock().unwrap().push(&buf[..n]);
                     let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                     let _ = out_tx.send(serde_json::json!({"type":"output","data":data}).to_string());
                     if is_local {
@@ -231,7 +272,7 @@ fn create_session(
     registry.lock().unwrap().insert(session_id.clone(), Session {
         id: session_id.clone(), command, cwd,
         created_at: now, is_local, running,
-        output_tx, input_tx, master,
+        output_tx, input_tx, master, output_buf,
     });
 
     Ok(session_id)
@@ -250,15 +291,16 @@ async fn handle_ws_client(
     };
     let (mut sink, mut source) = ws.split();
 
-    // Send welcome with all registered sessions
+    // Send welcome with all registered sessions (includes buffer_bytes for history-size prompting)
     let sessions_json: Vec<serde_json::Value> = registry.lock().unwrap().values()
         .map(|s| serde_json::json!({
-            "id":         s.id,
-            "command":    s.command,
-            "cwd":        s.cwd,
-            "created_at": s.created_at,
-            "is_local":   s.is_local,
-            "status":     if s.running.load(Ordering::Relaxed) { "running" } else { "exited" },
+            "id":           s.id,
+            "command":      s.command,
+            "cwd":          s.cwd,
+            "created_at":   s.created_at,
+            "is_local":     s.is_local,
+            "status":       if s.running.load(Ordering::Relaxed) { "running" } else { "exited" },
+            "buffer_bytes": s.output_buf.lock().unwrap().total_written(),
         }))
         .collect();
 
@@ -284,11 +326,12 @@ async fn handle_ws_client(
     let rows = first_msg["rows"].as_u64().unwrap_or(24) as u16;
     let cols = first_msg["cols"].as_u64().unwrap_or(80) as u16;
 
-    // Resolve output channel, input channel, and master handle
-    let (output_rx, input_tx, master_arc): (
+    // Resolve output channel, input channel, master handle, and history bytes to replay
+    let (output_rx, input_tx, master_arc, history_bytes): (
         broadcast::Receiver<String>,
         mpsc::UnboundedSender<Vec<u8>>,
         Arc<Mutex<Option<PtyMaster>>>,
+        Vec<u8>,
     ) = match first_msg["type"].as_str() {
         Some("init") => {
             let command = first_msg["command"].as_str().unwrap_or("pwsh").to_string();
@@ -309,29 +352,47 @@ async fn handle_ws_client(
             };
             let reg = registry.lock().unwrap();
             let s   = reg.get(&sid).unwrap();
-            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master))
+            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master), Vec::new())
         }
         Some("attach") => {
-            let sid    = first_msg["session_id"].as_str().unwrap_or("").to_string();
-            let triple = {
+            let sid     = first_msg["session_id"].as_str().unwrap_or("").to_string();
+            // offset > 0 → delta sync (client reconnected); 0 → use history preference
+            let offset  = first_msg["offset"].as_u64().unwrap_or(0);
+            let history = first_msg["history"].as_str().unwrap_or("1M").to_string();
+
+            let quad = {
                 let reg = registry.lock().unwrap();
                 reg.get(&sid).map(|s| (
-                    s.output_tx.subscribe(),
+                    s.output_tx.subscribe(), // subscribe FIRST — no gap with buffer snapshot
                     s.input_tx.clone(),
                     Arc::clone(&s.master),
+                    Arc::clone(&s.output_buf),
                 ))
             };
-            match triple {
-                Some((output_rx, input_tx, master_arc)) => {
-                    // Resize PTY to match client's terminal dimensions
+            match quad {
+                Some((output_rx, input_tx, master_arc, buf_arc)) => {
                     if let Ok(lock) = master_arc.lock() {
                         if let Some(m) = lock.as_ref() {
-                            let _ = m.0.resize(PtySize {
-                                rows, cols, pixel_width: 0, pixel_height: 0,
-                            });
+                            let _ = m.0.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                         }
                     }
-                    (output_rx, input_tx, master_arc)
+                    // Snapshot the history slice outside the registry lock
+                    let history_bytes: Vec<u8> = {
+                        let buf = buf_arc.lock().unwrap();
+                        if offset > 0 {
+                            // Delta: send only bytes client hasn't seen yet
+                            buf.slice_from(offset).to_vec()
+                        } else {
+                            match history.as_str() {
+                                "all"  => buf.slice_from(0).to_vec(),
+                                "10M"  => buf.last_n_bytes(10 * 1024 * 1024).to_vec(),
+                                "5M"   => buf.last_n_bytes(5  * 1024 * 1024).to_vec(),
+                                "none" => Vec::new(),
+                                _      => buf.last_n_bytes(1  * 1024 * 1024).to_vec(), // "1M" default
+                            }
+                        }
+                    };
+                    (output_rx, input_tx, master_arc, history_bytes)
                 }
                 None => {
                     let _ = sink.send(Message::Text(
@@ -344,7 +405,22 @@ async fn handle_ws_client(
         _ => return,
     };
 
-    // Forward PTY output → WS client (forward task owns sink)
+    // Stream history in 32 KB chunks; yield after each chunk so the async runtime
+    // can service other tasks and the WS back-pressure is respected naturally.
+    let total_history = history_bytes.len() as u64;
+    for chunk in history_bytes.chunks(32 * 1024) {
+        let data = base64::engine::general_purpose::STANDARD.encode(chunk);
+        if sink.send(Message::Text(
+            serde_json::json!({"type":"output","data":data}).to_string()
+        )).await.is_err() { return; }
+        tokio::task::yield_now().await;
+    }
+    // Notify client that history replay is complete
+    if sink.send(Message::Text(
+        serde_json::json!({"type":"history_done","total_bytes":total_history}).to_string()
+    )).await.is_err() { return; }
+
+    // Forward real-time PTY output → WS client (forward task owns sink)
     let forward = tauri::async_runtime::spawn(async move {
         let mut rx   = output_rx;
         let mut sink = sink;

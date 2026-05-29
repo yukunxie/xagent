@@ -1,3 +1,5 @@
+export type HistoryMode = "all" | "10M" | "5M" | "1M" | "none";
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -6,6 +8,7 @@ export interface SessionInfo {
   cwd: string;
   status: "running" | "exited";
   created_at: number;
-  wsUrl?: string;       // set for remote WS sessions
-  wsSessionId?: string; // if set: attach to this existing remote session ID
+  wsUrl?: string;        // set for remote WS sessions
+  wsSessionId?: string;  // if set: attach to this existing remote session ID
+  historyMode?: HistoryMode;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -6,11 +6,14 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { PromptOverlay } from "./PromptOverlay";
 import { usePromptDetection } from "../hooks/usePromptDetection";
+import { HistoryMode } from "../types";
 
 interface Props {
   sessionId:    string;
-  wsUrl?:       string;   // if set: remote WebSocket session
-  wsSessionId?: string;   // if set: attach to existing remote session
+  isActive?:    boolean;      // controlled by parent — triggers fit/focus on tab switch
+  wsUrl?:       string;       // if set: remote WebSocket session
+  wsSessionId?: string;       // if set: attach to existing remote session
+  historyMode?: HistoryMode;  // how much history to sync on attach
   command?:     string;
   args?:        string[];
   cwd?:         string;
@@ -24,13 +27,67 @@ function encodeBase64(str: string): string {
   return btoa(bin);
 }
 
-export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd }: Props) {
+export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyMode, command, args, cwd }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef      = useRef<Terminal | null>(null);
   const fitRef       = useRef<FitAddon | null>(null);
   const wsRef        = useRef<WebSocket | null>(null);
+  const offsetRef    = useRef<number>(0);   // total bytes received (for delta reconnect)
+
+  // Write queue: incoming bytes are enqueued; a RAF loop drains ≤64 KB per frame
+  // This prevents the browser from freezing when replaying large history bursts.
+  const writeQueueRef  = useRef<Uint8Array[]>([]);
+  const rafRef         = useRef<number | null>(null);
+
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   const { prompt, setLastText, clearPrompt } = usePromptDetection();
 
+  // ── Write-queue helpers ────────────────────────────────────────────────────
+  const flushQueue = () => {
+    const term  = termRef.current;
+    const queue = writeQueueRef.current;
+    if (!term || queue.length === 0) { rafRef.current = null; return; }
+
+    const MAX_PER_FRAME = 64 * 1024; // 64 KB per animation frame
+    let written = 0;
+    while (queue.length > 0 && written < MAX_PER_FRAME) {
+      const chunk = queue.shift()!;
+      term.write(chunk);
+      written += chunk.length;
+    }
+    if (queue.length > 0) {
+      rafRef.current = requestAnimationFrame(flushQueue);
+    } else {
+      rafRef.current = null;
+    }
+  };
+
+  const enqueueWrite = (bytes: Uint8Array) => {
+    writeQueueRef.current.push(bytes);
+    if (rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(flushQueue);
+    }
+  };
+
+  // ── isActive: fit + focus when tab becomes visible ────────────────────────
+  useEffect(() => {
+    if (!isActive || !fitRef.current) return;
+    const t = setTimeout(() => {
+      fitRef.current?.fit();
+      termRef.current?.focus();
+      const rows = termRef.current?.rows ?? 24;
+      const cols = termRef.current?.cols ?? 80;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "resize", rows, cols }));
+      } else if (!wsRef.current) {
+        invoke("resize_session", { sessionId, rows, cols }).catch(() => {});
+      }
+    }, 50);
+    return () => clearTimeout(t);
+  }, [isActive, sessionId]);
+
+  // ── Main terminal setup (runs once per session) ───────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -72,22 +129,23 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
     let cleanup: () => void;
 
     if (wsUrl) {
-      // ── Remote WebSocket path ─────────────────────────────────────────────
+      // ── Remote WebSocket path ────────────────────────────────────────────
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         fitAddon.fit();
         if (wsSessionId) {
-          // Attach to an existing remote session
+          setLoadingHistory(true);
           ws.send(JSON.stringify({
             type:       "attach",
             session_id: wsSessionId,
             rows:       term.rows,
             cols:       term.cols,
+            offset:     offsetRef.current, // 0 on first connect; delta on reconnect
+            history:    historyMode ?? "1M",
           }));
         } else {
-          // Start a new session on the remote host
           ws.send(JSON.stringify({
             type:    "init",
             command: command ?? "pwsh",
@@ -105,8 +163,11 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
           const msg = JSON.parse(e.data as string);
           if (msg.type === "output") {
             const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
-            term.write(bytes);
+            offsetRef.current += bytes.length;
+            enqueueWrite(bytes);
             setLastText(new TextDecoder().decode(bytes));
+          } else if (msg.type === "history_done") {
+            setLoadingHistory(false);
           } else if (msg.type === "exit") {
             term.writeln("\r\n\x1b[90m[remote process exited]\x1b[0m");
           } else if (msg.type === "error") {
@@ -115,8 +176,8 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
         } catch { /* ignore */ }
       };
 
-      ws.onerror = () => term.writeln("\r\n\x1b[31m[connection error]\x1b[0m");
-      ws.onclose = () => term.writeln("\r\n\x1b[90m[disconnected]\x1b[0m");
+      ws.onerror = () => { setLoadingHistory(false); term.writeln("\r\n\x1b[31m[connection error]\x1b[0m"); };
+      ws.onclose = () => { setLoadingHistory(false); term.writeln("\r\n\x1b[90m[disconnected]\x1b[0m"); };
 
       term.onData((data) => {
         if (ws.readyState === WebSocket.OPEN)
@@ -134,6 +195,8 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
       cleanup = () => {
         clearTimeout(initTimer);
         if (resizeTimer) clearTimeout(resizeTimer);
+        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+        writeQueueRef.current = [];
         observer.disconnect();
         ws.close();
         term.dispose();
@@ -151,7 +214,7 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
       const unlistenData = listen<{ session_id: string; data: string }>("pty_data", (event) => {
         if (event.payload.session_id !== sessionId) return;
         const bytes = Uint8Array.from(atob(event.payload.data), (c) => c.charCodeAt(0));
-        term.write(bytes);
+        enqueueWrite(bytes);
         setLastText(new TextDecoder().decode(bytes));
       });
 
@@ -171,6 +234,8 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
       cleanup = () => {
         clearTimeout(initTimer);
         if (resizeTimer) clearTimeout(resizeTimer);
+        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+        writeQueueRef.current = [];
         unlistenData.then((fn) => fn());
         unlistenExit.then((fn) => fn());
         observer.disconnect();
@@ -179,7 +244,7 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
     }
 
     return cleanup;
-  }, [sessionId, wsUrl, wsSessionId]);
+  }, [sessionId, wsUrl, wsSessionId]); // stable deps — terminal lives for the session's lifetime
 
   const sendInput = (text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -197,6 +262,17 @@ export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd
   return (
     <div className="absolute inset-0 overflow-hidden" onClick={() => termRef.current?.focus()}>
       <div ref={containerRef} className="w-full h-full" />
+      {loadingHistory && (
+        <div style={{
+          position: "absolute", top: 8, right: 12,
+          background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)",
+          border: "1px solid #3f3f46", borderRadius: "0.375rem",
+          padding: "2px 10px", fontSize: "0.75rem", color: "#a1a1aa",
+          pointerEvents: "none", zIndex: 10,
+        }}>
+          ⏳ 加载历史…
+        </div>
+      )}
       {prompt && (
         <PromptOverlay type={prompt} onSend={sendInput} onDismiss={clearPrompt} />
       )}

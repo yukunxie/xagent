@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { SessionInfo } from "./types";
+import { SessionInfo, HistoryMode } from "./types";
 import { TabBar } from "./components/SessionList";
 import { TerminalView } from "./components/TerminalView";
 import { NewSessionModal } from "./components/NewSessionModal";
@@ -42,7 +42,7 @@ export default function App() {
     };
   }, []);
 
-  const handleCreate = async (name: string, command: string, args: string[], cwd: string, wsUrl?: string, wsSessionId?: string) => {
+  const handleCreate = async (name: string, command: string, args: string[], cwd: string, wsUrl?: string, wsSessionId?: string, historyMode?: HistoryMode) => {
     const next: SessionInfo = {
       id: "",
       name,
@@ -53,6 +53,7 @@ export default function App() {
       created_at: Date.now() / 1000,
       wsUrl,
       wsSessionId,
+      historyMode,
     };
 
     if (wsUrl) {
@@ -102,21 +103,26 @@ export default function App() {
         className="relative flex-1 min-h-0 overflow-hidden"
         style={showCloseConfirm || showNew ? { pointerEvents: "none" } : undefined}
       >
-        {activeId ? (() => {
-          const s = sessions.find((x) => x.id === activeId);
-          return (
-            <TerminalView
-              key={activeId}
-              sessionId={activeId}
-              wsUrl={s?.wsUrl}
-              wsSessionId={s?.wsSessionId}
-              command={s?.command}
-              args={s?.args}
-              cwd={s?.cwd}
-            />
-          );
-        })() : (
+        {sessions.length === 0 ? (
           <EmptyState onNew={() => setShowNew(true)} />
+        ) : (
+          sessions.map((s) => (
+            <div
+              key={s.id}
+              style={{ display: s.id !== activeId ? "none" : undefined, position: "absolute", inset: 0 }}
+            >
+              <TerminalView
+                sessionId={s.id}
+                isActive={s.id === activeId}
+                wsUrl={s.wsUrl}
+                wsSessionId={s.wsSessionId}
+                historyMode={s.historyMode}
+                command={s.command}
+                args={s.args}
+                cwd={s.cwd}
+              />
+            </div>
+          ))
         )}
       </div>
 
