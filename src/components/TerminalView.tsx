@@ -39,6 +39,7 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
   const writeQueueRef  = useRef<Uint8Array[]>([]);
   const rafRef         = useRef<number | null>(null);
 
+  const loadingHistoryRef = useRef(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const { prompt, setLastText, clearPrompt } = usePromptDetection();
@@ -73,11 +74,16 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
   // ── isActive: fit + focus when tab becomes visible ────────────────────────
   useEffect(() => {
     if (!isActive || !fitRef.current) return;
+    // Give the browser one paint cycle to un-hide the container before measuring
     const t = setTimeout(() => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
       fitRef.current?.fit();
       termRef.current?.focus();
       const rows = termRef.current?.rows ?? 24;
       const cols = termRef.current?.cols ?? 80;
+      if (rows === 0 || cols === 0) return;
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "resize", rows, cols }));
       } else if (!wsRef.current) {
@@ -116,13 +122,20 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
     fitRef.current  = fitAddon;
 
     const syncSize = (ws?: WebSocket) => {
+      // Guard: don't resize when container is hidden (display:none → 0×0 → PTY corruption)
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+
       fitAddon.fit();
+      const { rows, cols } = term;
+      if (rows === 0 || cols === 0) return;
       term.focus();
       if (ws) {
         if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ type: "resize", rows: term.rows, cols: term.cols }));
+          ws.send(JSON.stringify({ type: "resize", rows, cols }));
       } else {
-        invoke("resize_session", { sessionId, rows: term.rows, cols: term.cols }).catch(() => {});
+        invoke("resize_session", { sessionId, rows, cols }).catch(() => {});
       }
     };
 
@@ -137,12 +150,13 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
         fitAddon.fit();
         if (wsSessionId) {
           setLoadingHistory(true);
+          loadingHistoryRef.current = true;
           ws.send(JSON.stringify({
             type:       "attach",
             session_id: wsSessionId,
-            rows:       term.rows,
-            cols:       term.cols,
-            offset:     offsetRef.current, // 0 on first connect; delta on reconnect
+            rows:       term.rows || 24,
+            cols:       term.cols || 80,
+            offset:     offsetRef.current,
             history:    historyMode ?? "1M",
           }));
         } else {
@@ -151,8 +165,8 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
             command: command ?? "pwsh",
             args:    args ?? [],
             cwd:     cwd ?? "",
-            rows:    term.rows,
-            cols:    term.cols,
+            rows:    term.rows || 24,
+            cols:    term.cols || 80,
           }));
         }
         term.focus();
@@ -165,9 +179,21 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
             const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
             offsetRef.current += bytes.length;
             enqueueWrite(bytes);
-            setLastText(new TextDecoder().decode(bytes));
+            // Skip prompt detection during history replay to avoid excessive re-renders
+            if (!loadingHistoryRef.current) setLastText(new TextDecoder().decode(bytes));
           } else if (msg.type === "history_done") {
+            loadingHistoryRef.current = false;
             setLoadingHistory(false);
+            if (msg.total_bytes > 0) {
+              // Separator so user can see where history ends and live output begins
+              const kb = Math.round((msg.total_bytes as number) / 1024);
+              const sep = new TextEncoder().encode(
+                `\r\n\x1b[90m─── 历史回放完成 (${kb} KB) ───\x1b[0m\r\n`
+              );
+              enqueueWrite(sep);
+            }
+            // Ensure terminal is scrolled to show the latest output
+            setTimeout(() => termRef.current?.scrollToBottom(), 100);
           } else if (msg.type === "exit") {
             term.writeln("\r\n\x1b[90m[remote process exited]\x1b[0m");
           } else if (msg.type === "error") {
@@ -186,7 +212,10 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
 
       const initTimer = setTimeout(() => syncSize(ws), 50);
       let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-      const observer = new ResizeObserver(() => {
+      const observer = new ResizeObserver((entries) => {
+        // Ignore when container is hidden (display:none → 0×0 → would corrupt PTY size)
+        const entry = entries[0];
+        if (!entry || entry.contentRect.width === 0 || entry.contentRect.height === 0) return;
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => syncSize(ws), 150);
       });
@@ -225,7 +254,9 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
 
       const initTimer = setTimeout(() => syncSize(), 50);
       let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-      const observer = new ResizeObserver(() => {
+      const observer = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry || entry.contentRect.width === 0 || entry.contentRect.height === 0) return;
         if (resizeTimer) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => syncSize(), 150);
       });
