@@ -27,6 +27,31 @@ function encodeBase64(str: string): string {
   return btoa(bin);
 }
 
+// ── Terminal themes ───────────────────────────────────────────────────────────
+// Local: near-black "Zinc" dark theme
+const LOCAL_THEME = {
+  background:          "#09090b",
+  foreground:          "#e4e4e7",
+  cursor:              "#a1a1aa",
+  selectionBackground: "#3f3f46",
+  black:               "#18181b", red:           "#f87171", green:     "#4ade80", yellow:       "#facc15",
+  blue:                "#60a5fa", magenta:       "#c084fc", cyan:      "#22d3ee", white:        "#e4e4e7",
+  brightBlack:         "#52525b", brightRed:     "#fca5a5", brightGreen: "#86efac", brightYellow: "#fde047",
+  brightBlue:          "#93c5fd", brightMagenta: "#d8b4fe", brightCyan: "#67e8f9", brightWhite:  "#f4f4f5",
+};
+
+// Remote: PyCharm Darcula theme
+const REMOTE_THEME = {
+  background:          "#2b2b2b",
+  foreground:          "#a9b7c6",
+  cursor:              "#bbbbbb",
+  selectionBackground: "#214283",
+  black:               "#3c3f41", red:           "#cc666e", green:     "#629755", yellow:       "#bbb529",
+  blue:                "#6897bb", magenta:       "#b55b8f", cyan:      "#629755", white:        "#bbbbbb",
+  brightBlack:         "#808080", brightRed:     "#ff6b68", brightGreen: "#57a64a", brightYellow: "#ffe400",
+  brightBlue:          "#4e9ee7", brightMagenta: "#c878be", brightCyan: "#00e2e2", brightWhite:  "#ffffff",
+};
+
 export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyMode, command, args, cwd }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef      = useRef<Terminal | null>(null);
@@ -97,16 +122,10 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const isRemote = !!wsUrl;
+
     const term = new Terminal({
-      theme: {
-        background: "#09090b", foreground: "#e4e4e7", cursor: "#a1a1aa",
-        selectionBackground: "#3f3f46",
-        black: "#18181b", red: "#f87171", green: "#4ade80", yellow: "#facc15",
-        blue: "#60a5fa", magenta: "#c084fc", cyan: "#22d3ee", white: "#e4e4e7",
-        brightBlack: "#52525b", brightRed: "#fca5a5", brightGreen: "#86efac",
-        brightYellow: "#fde047", brightBlue: "#93c5fd", brightMagenta: "#d8b4fe",
-        brightCyan: "#67e8f9", brightWhite: "#f4f4f5",
-      },
+      theme: isRemote ? REMOTE_THEME : LOCAL_THEME,
       fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
       cursorBlink: true,
@@ -290,9 +309,33 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
     termRef.current?.focus();
   };
 
+  const isRemote = !!wsUrl;
+
   return (
-    <div className="absolute inset-0 overflow-hidden" onClick={() => termRef.current?.focus()}>
+    <div
+      className="absolute inset-0 overflow-hidden"
+      style={isRemote ? {
+        // PyCharm Darcula outer shell: subtle warm-grey border + matching background
+        background:  "#2b2b2b",
+        borderTop:   "2px solid #4e7cbf",   // IntelliJ blue accent line at top
+      } : {
+        background: "#09090b",
+      }}
+      onClick={() => termRef.current?.focus()}
+    >
       <div ref={containerRef} className="w-full h-full" />
+      {/* Remote indicator badge */}
+      {isRemote && (
+        <div style={{
+          position: "absolute", top: 6, left: 10,
+          background: "#214283", border: "1px solid #4e7cbf",
+          borderRadius: "0.25rem", padding: "1px 7px",
+          fontSize: "0.7rem", color: "#a9c9f5", letterSpacing: "0.04em",
+          pointerEvents: "none", zIndex: 10,
+        }}>
+          ⚡ REMOTE
+        </div>
+      )}
       {loadingHistory && (
         <div style={{
           position: "absolute", top: 8, right: 12,
