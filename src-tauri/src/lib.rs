@@ -65,6 +65,7 @@ pub(crate) struct Session {
     pub is_local:     bool,
     pub running:      Arc<AtomicBool>,
     pub client_count: Arc<AtomicU32>,                  // number of remote WS clients attached
+    pub pty_size:     Arc<Mutex<(u16, u16)>>,          // current PTY (rows, cols) — authoritative for local sessions
     pub output_tx:    broadcast::Sender<String>,       // PTY output → all WS subscribers
     pub input_tx:     mpsc::UnboundedSender<Vec<u8>>,  // input → PTY writer task
     pub master:       Arc<Mutex<Option<PtyMaster>>>,   // for resize + kill
@@ -134,17 +135,19 @@ fn resize_session(
     rows:       u16,
     cols:       u16,
 ) -> Result<(), String> {
-    let master_arc = {
+    let (master_arc, size_arc) = {
         let reg = state.registry.lock().unwrap();
         let s = reg.get(&session_id)
             .ok_or_else(|| format!("Session {} not found", session_id))?;
-        Arc::clone(&s.master)
+        (Arc::clone(&s.master), Arc::clone(&s.pty_size))
     };
     let lock = master_arc.lock().unwrap();
     if let Some(m) = lock.as_ref() {
         m.0.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
     }
+    // Keep stored size in sync so remote clients can be told the correct dimensions
+    *size_arc.lock().unwrap() = (rows, cols);
     Ok(())
 }
 
@@ -225,6 +228,7 @@ fn create_session(
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let running       = Arc::new(AtomicBool::new(true));
     let client_count  = Arc::new(AtomicU32::new(0));
+    let pty_size      = Arc::new(Mutex::new((rows, cols)));
     let output_buf    = Arc::new(Mutex::new(OutputBuffer::new()));
 
     // — Reader thread: PTY bytes → output_buf + broadcast + Tauri events —
@@ -278,7 +282,7 @@ fn create_session(
 
     registry.lock().unwrap().insert(session_id.clone(), Session {
         id: session_id.clone(), command, cwd,
-        created_at: now, is_local, running, client_count,
+        created_at: now, is_local, running, client_count, pty_size,
         output_tx, input_tx, master, output_buf,
     });
 
@@ -334,13 +338,16 @@ async fn handle_ws_client(
     let cols = first_msg["cols"].as_u64().unwrap_or(80) as u16;
 
     // Resolve output channel, input channel, master handle, and history bytes to replay
-    let (output_rx, input_tx, master_arc, history_bytes, attached_session_id, client_count_arc): (
+    let (output_rx, input_tx, master_arc, history_bytes, attached_session_id, client_count_arc,
+         pty_size_arc, session_is_local): (
         broadcast::Receiver<String>,
         mpsc::UnboundedSender<Vec<u8>>,
         Arc<Mutex<Option<PtyMaster>>>,
         Vec<u8>,
         String,
         Arc<AtomicU32>,
+        Arc<Mutex<(u16, u16)>>,
+        bool,
     ) = match first_msg["type"].as_str() {
         Some("init") => {
             let command = first_msg["command"].as_str().unwrap_or("pwsh").to_string();
@@ -361,7 +368,8 @@ async fn handle_ws_client(
             };
             let reg = registry.lock().unwrap();
             let s   = reg.get(&sid).unwrap();
-            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master), Vec::new(), sid, Arc::clone(&s.client_count))
+            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master), Vec::new(),
+             sid, Arc::clone(&s.client_count), Arc::clone(&s.pty_size), false)
         }
         Some("attach") => {
             let sid     = first_msg["session_id"].as_str().unwrap_or("").to_string();
@@ -377,15 +385,19 @@ async fn handle_ws_client(
                     Arc::clone(&s.master),
                     Arc::clone(&s.output_buf),
                     Arc::clone(&s.client_count),
+                    Arc::clone(&s.pty_size),
+                    s.is_local,
                 ))
             };
             match quad {
-                Some((output_rx, input_tx, master_arc, buf_arc, client_count_arc)) => {
-                    if let Ok(lock) = master_arc.lock() {
-                        if let Some(m) = lock.as_ref() {
-                            let _ = m.0.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-                        }
-                    }
+                Some((output_rx, input_tx, master_arc, buf_arc, client_count_arc,
+                      pty_size_arc, is_local)) => {
+                    // ── DO NOT resize PTY here ──────────────────────────────────────
+                    // For local sessions the local xterm is the authoritative size owner.
+                    // Resizing to the remote client's dimensions would garble the local
+                    // display. We'll instead tell the client the current PTY size after
+                    // history replay so it can adapt its own xterm.
+
                     // Snapshot the history slice outside the registry lock
                     let history_bytes: Vec<u8> = {
                         let buf = buf_arc.lock().unwrap();
@@ -402,7 +414,8 @@ async fn handle_ws_client(
                             }
                         }
                     };
-                    (output_rx, input_tx, master_arc, history_bytes, sid, client_count_arc)
+                    (output_rx, input_tx, master_arc, history_bytes, sid, client_count_arc,
+                     pty_size_arc, is_local)
                 }
                 None => {
                     let _ = sink.send(Message::Text(
@@ -429,6 +442,16 @@ async fn handle_ws_client(
     if sink.send(Message::Text(
         serde_json::json!({"type":"history_done","total_bytes":total_history}).to_string()
     )).await.is_err() { return; }
+
+    // Tell the remote client the actual PTY size so it can resize its own xterm to
+    // match. This is especially important for local sessions where the PTY size is
+    // controlled by the local display, not the remote client.
+    {
+        let (pty_rows, pty_cols) = *pty_size_arc.lock().unwrap();
+        let _ = sink.send(Message::Text(
+            serde_json::json!({"type":"terminal_size","rows":pty_rows,"cols":pty_cols}).to_string()
+        )).await;
+    }
 
     // Notify local UI that a remote client connected
     let count = client_count_arc.fetch_add(1, Ordering::Relaxed) + 1;
@@ -461,12 +484,19 @@ async fn handle_ws_client(
                 }
             }
             Some("resize") => {
-                let r = v["rows"].as_u64().unwrap_or(24) as u16;
-                let c = v["cols"].as_u64().unwrap_or(80) as u16;
-                if let Ok(lock) = master_arc.lock() {
-                    if let Some(m) = lock.as_ref() {
-                        let _ = m.0.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
+                // For local sessions, the local xterm owns the PTY size — ignore remote resize
+                // requests so the web/mobile client can never garble the local display.
+                // For web-initiated sessions (is_local=false) the client is the only viewer,
+                // so remote resize is fine.
+                if !session_is_local {
+                    let r = v["rows"].as_u64().unwrap_or(24) as u16;
+                    let c = v["cols"].as_u64().unwrap_or(80) as u16;
+                    if let Ok(lock) = master_arc.lock() {
+                        if let Some(m) = lock.as_ref() {
+                            let _ = m.0.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
+                        }
                     }
+                    *pty_size_arc.lock().unwrap() = (r, c);
                 }
             }
             _ => {}
