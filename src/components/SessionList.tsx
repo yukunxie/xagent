@@ -19,6 +19,7 @@ export function TabBar({ sessions, activeId, onSelect, onNew, onKill }: Props) {
       {/* Tabs */}
       {sessions.map((s) => {
       const label = s.name || s.command.split(/[\\/]/).pop() || s.command;
+      const icon  = s.wsUrl ? "🌐" : "🖥️";
         const isActive = s.id === activeId;
         return (
           <div
@@ -42,7 +43,8 @@ export function TabBar({ sessions, activeId, onSelect, onNew, onKill }: Props) {
               }`}
             />
 
-            {/* Label */}
+            {/* Type icon + Label */}
+            <span className="text-xs flex-shrink-0 opacity-60">{icon}</span>
             <span className="text-xs font-mono truncate flex-1">{label}</span>
 
             {/* Close button */}

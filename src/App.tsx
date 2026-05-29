@@ -42,7 +42,27 @@ export default function App() {
     };
   }, []);
 
-  const handleCreate = async (name: string, command: string, args: string[], cwd: string) => {
+  const handleCreate = async (name: string, command: string, args: string[], cwd: string, wsUrl?: string) => {
+    const next: SessionInfo = {
+      id: "",
+      name,
+      command,
+      args,
+      cwd,
+      status: "running",
+      created_at: Date.now() / 1000,
+      wsUrl,
+    };
+
+    if (wsUrl) {
+      // Remote session — no Rust PTY, TerminalView manages WS directly
+      next.id = `remote-${crypto.randomUUID()}`;
+      setSessions((prev) => [...prev, next]);
+      setActiveId(next.id);
+      setShowNew(false);
+      return;
+    }
+
     const sessionId = await invoke<string>("start_session", {
       command,
       args,
@@ -50,21 +70,15 @@ export default function App() {
       rows: 24,
       cols: 80,
     });
-    const next: SessionInfo = {
-      id: sessionId,
-      name,
-      command,
-      cwd,
-      status: "running",
-      created_at: Date.now() / 1000,
-    };
+    next.id = sessionId;
     setSessions((prev) => [...prev, next]);
     setActiveId(sessionId);
     setShowNew(false);
   };
 
   const handleKill = async (id: string) => {
-    await invoke("kill_session", { sessionId: id });
+    const s = sessions.find((x) => x.id === id);
+    if (!s?.wsUrl) await invoke("kill_session", { sessionId: id });
     setSessions((prev) => prev.filter((s) => s.id !== id));
     if (activeId === id) {
       const remaining = sessions.filter((s) => s.id !== id);
@@ -87,9 +101,19 @@ export default function App() {
         className="relative flex-1 min-h-0 overflow-hidden"
         style={showCloseConfirm || showNew ? { pointerEvents: "none" } : undefined}
       >
-        {activeId ? (
-          <TerminalView key={activeId} sessionId={activeId} />
-        ) : (
+        {activeId ? (() => {
+          const s = sessions.find((x) => x.id === activeId);
+          return (
+            <TerminalView
+              key={activeId}
+              sessionId={activeId}
+              wsUrl={s?.wsUrl}
+              command={s?.command}
+              args={s?.args}
+              cwd={s?.cwd}
+            />
+          );
+        })() : (
           <EmptyState onNew={() => setShowNew(true)} />
         )}
       </div>

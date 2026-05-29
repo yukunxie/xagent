@@ -1,10 +1,12 @@
 use base64::Engine;
+use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 use uuid::Uuid;
 
 // Safety: portable-pty's MasterPty on Windows wraps a ConPTY HANDLE,
@@ -207,11 +209,149 @@ fn kill_session(state: State<AppState>, session_id: String) {
     state.sessions.lock().unwrap().remove(&session_id);
 }
 
+// ─── WebSocket server (remote access) ────────────────────────────────────────
+
+async fn handle_ws_client(stream: tokio::net::TcpStream) {
+    let ws = match accept_async(stream).await {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let (mut sink, mut source) = ws.split();
+
+    // Wait for the init message
+    let init: serde_json::Value = loop {
+        match source.next().await {
+            Some(Ok(Message::Text(text))) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v["type"] == "init" { break v; }
+                }
+            }
+            _ => return,
+        }
+    };
+
+    let command = init["command"].as_str().unwrap_or("pwsh").to_string();
+    let cwd     = init["cwd"].as_str().unwrap_or("").to_string();
+    let rows    = init["rows"].as_u64().unwrap_or(24) as u16;
+    let cols    = init["cols"].as_u64().unwrap_or(80) as u16;
+    let args: Vec<String> = init["args"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let pty_system = native_pty_system();
+    let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type":"error","message":e.to_string()}).to_string()
+            )).await;
+            return;
+        }
+    };
+
+    let mut cmd = CommandBuilder::new(&command);
+    for arg in &args { cmd.arg(arg); }
+    if !cwd.is_empty() { cmd.cwd(&cwd); }
+
+    let _child = match pair.slave.spawn_command(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = sink.send(Message::Text(
+                serde_json::json!({"type":"error","message":e.to_string()}).to_string()
+            )).await;
+            return;
+        }
+    };
+    drop(pair.slave);
+
+    let master_arc = Arc::new(Mutex::new(PtyMaster(pair.master)));
+    let master_resize = Arc::clone(&master_arc);
+    let mut writer = master_arc.lock().unwrap().0.take_writer().unwrap();
+    let mut reader = master_arc.lock().unwrap().0.try_clone_reader().unwrap();
+
+    // PTY reader thread → async channel → WS sink
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+    std::thread::spawn(move || {
+        let _keep = master_arc; // keep ConPTY alive
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    let _ = tx.blocking_send(serde_json::json!({"type":"exit"}).to_string());
+                    break;
+                }
+                Ok(n) => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    let _ = tx.blocking_send(
+                        serde_json::json!({"type":"output","data":data}).to_string()
+                    );
+                }
+            }
+        }
+    });
+
+    // Forward PTY output to WS client
+    tauri::async_runtime::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if sink.send(Message::Text(msg)).await.is_err() { break; }
+        }
+    });
+
+    // Handle incoming WS messages → PTY
+    while let Some(Ok(Message::Text(text))) = source.next().await {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        match msg["type"].as_str() {
+            Some("input") => {
+                if let Some(data) = msg["data"].as_str() {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+                        let _ = writer.write_all(&bytes);
+                        let _ = writer.flush();
+                    }
+                }
+            }
+            Some("resize") => {
+                let r = msg["rows"].as_u64().unwrap_or(24) as u16;
+                let c = msg["cols"].as_u64().unwrap_or(80) as u16;
+                let _ = master_resize.lock().unwrap().0.resize(
+                    PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 }
+                );
+            }
+            _ => {}
+        }
+    }
+    // WS connection closed — PTY resources drop automatically
+}
+
+fn start_ws_server(port: u16) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(l) => l,
+            Err(e) => { eprintln!("[xagent ws] bind error on port {port}: {e}"); return; }
+        };
+        println!("[xagent ws] server listening on port {port}");
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    println!("[xagent ws] connection from {addr}");
+                    tauri::async_runtime::spawn(handle_ws_client(stream));
+                }
+                Err(e) => eprintln!("[xagent ws] accept error: {e}"),
+            }
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|_app| {
+            start_ws_server(9999);
+            Ok(())
+        })
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
         })
