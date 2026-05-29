@@ -11,4 +11,5 @@ export interface SessionInfo {
   wsUrl?: string;        // set for remote WS sessions
   wsSessionId?: string;  // if set: attach to this existing remote session ID
   historyMode?: HistoryMode;
+  client_count?: number; // remote WS clients currently attached (local sessions only)
 }

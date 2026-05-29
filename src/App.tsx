@@ -29,6 +29,18 @@ export default function App() {
       }
     );
 
+    // Keep remote client count badge up-to-date
+    const unlistenRemote = listen<{ session_id: string; count: number }>(
+      "remote_client_change",
+      (e) => {
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === e.payload.session_id ? { ...s, client_count: e.payload.count } : s
+          )
+        );
+      }
+    );
+
     // Intercept window close — show React confirmation modal
     const unlistenClose = appWindowRef.current.onCloseRequested((event) => {
       if (forceCloseRef.current) return; // user confirmed — let it close
@@ -38,6 +50,7 @@ export default function App() {
 
     return () => {
       unlisten.then((fn) => fn());
+      unlistenRemote.then((fn) => fn());
       unlistenClose.then((fn) => fn());
     };
   }, []);
@@ -117,6 +130,7 @@ export default function App() {
                 wsUrl={s.wsUrl}
                 wsSessionId={s.wsSessionId}
                 historyMode={s.historyMode}
+                clientCount={s.client_count ?? 0}
                 command={s.command}
                 args={s.args}
                 cwd={s.cwd}

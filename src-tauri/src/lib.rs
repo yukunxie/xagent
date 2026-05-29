@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
 };
 use tauri::{AppHandle, Emitter, State};
@@ -58,16 +58,17 @@ impl OutputBuffer {
 // ─── Unified Session (local PTY + WS-attached) ───────────────────────────────
 
 pub(crate) struct Session {
-    pub id:         String,
-    pub command:    String,
-    pub cwd:        String,
-    pub created_at: u64,
-    pub is_local:   bool,
-    pub running:    Arc<AtomicBool>,
-    pub output_tx:  broadcast::Sender<String>,        // PTY output → all WS subscribers
-    pub input_tx:   mpsc::UnboundedSender<Vec<u8>>,   // input → PTY writer task
-    pub master:     Arc<Mutex<Option<PtyMaster>>>,    // for resize + kill
-    pub output_buf: Arc<Mutex<OutputBuffer>>,         // rolling PTY history (50 MB cap)
+    pub id:           String,
+    pub command:      String,
+    pub cwd:          String,
+    pub created_at:   u64,
+    pub is_local:     bool,
+    pub running:      Arc<AtomicBool>,
+    pub client_count: Arc<AtomicU32>,                  // number of remote WS clients attached
+    pub output_tx:    broadcast::Sender<String>,       // PTY output → all WS subscribers
+    pub input_tx:     mpsc::UnboundedSender<Vec<u8>>,  // input → PTY writer task
+    pub master:       Arc<Mutex<Option<PtyMaster>>>,   // for resize + kill
+    pub output_buf:   Arc<Mutex<OutputBuffer>>,        // rolling PTY history (50 MB cap)
 }
 
 pub(crate) type Registry = Arc<Mutex<HashMap<String, Session>>>;
@@ -86,7 +87,8 @@ pub struct SessionInfo {
     pub status:       String,
     pub created_at:   u64,
     pub is_local:     bool,
-    pub buffer_bytes: u64,  // total PTY bytes written (for client history-size prompt)
+    pub buffer_bytes: u64,   // total PTY bytes written (for client history-size prompt)
+    pub client_count: u32,   // number of remote clients currently attached
 }
 
 #[derive(Serialize, Clone)]
@@ -94,6 +96,9 @@ struct PtyDataEvent { session_id: String, data: String }
 
 #[derive(Serialize, Clone)]
 struct PtyExitEvent { session_id: String, exit_code: Option<i32> }
+
+#[derive(Serialize, Clone)]
+struct RemoteClientEvent { session_id: String, count: u32 }
 
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
@@ -184,6 +189,7 @@ fn session_to_info(s: &Session) -> SessionInfo {
         created_at:   s.created_at,
         is_local:     s.is_local,
         buffer_bytes: s.output_buf.lock().unwrap().total_written(),
+        client_count: s.client_count.load(Ordering::Relaxed),
     }
 }
 
@@ -217,8 +223,9 @@ fn create_session(
 
     let (output_tx, _) = broadcast::channel::<String>(512);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let running    = Arc::new(AtomicBool::new(true));
-    let output_buf = Arc::new(Mutex::new(OutputBuffer::new()));
+    let running       = Arc::new(AtomicBool::new(true));
+    let client_count  = Arc::new(AtomicU32::new(0));
+    let output_buf    = Arc::new(Mutex::new(OutputBuffer::new()));
 
     // — Reader thread: PTY bytes → output_buf + broadcast + Tauri events —
     let sid          = session_id.clone();
@@ -271,7 +278,7 @@ fn create_session(
 
     registry.lock().unwrap().insert(session_id.clone(), Session {
         id: session_id.clone(), command, cwd,
-        created_at: now, is_local, running,
+        created_at: now, is_local, running, client_count,
         output_tx, input_tx, master, output_buf,
     });
 
@@ -327,11 +334,13 @@ async fn handle_ws_client(
     let cols = first_msg["cols"].as_u64().unwrap_or(80) as u16;
 
     // Resolve output channel, input channel, master handle, and history bytes to replay
-    let (output_rx, input_tx, master_arc, history_bytes): (
+    let (output_rx, input_tx, master_arc, history_bytes, attached_session_id, client_count_arc): (
         broadcast::Receiver<String>,
         mpsc::UnboundedSender<Vec<u8>>,
         Arc<Mutex<Option<PtyMaster>>>,
         Vec<u8>,
+        String,
+        Arc<AtomicU32>,
     ) = match first_msg["type"].as_str() {
         Some("init") => {
             let command = first_msg["command"].as_str().unwrap_or("pwsh").to_string();
@@ -352,7 +361,7 @@ async fn handle_ws_client(
             };
             let reg = registry.lock().unwrap();
             let s   = reg.get(&sid).unwrap();
-            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master), Vec::new())
+            (s.output_tx.subscribe(), s.input_tx.clone(), Arc::clone(&s.master), Vec::new(), sid, Arc::clone(&s.client_count))
         }
         Some("attach") => {
             let sid     = first_msg["session_id"].as_str().unwrap_or("").to_string();
@@ -367,10 +376,11 @@ async fn handle_ws_client(
                     s.input_tx.clone(),
                     Arc::clone(&s.master),
                     Arc::clone(&s.output_buf),
+                    Arc::clone(&s.client_count),
                 ))
             };
             match quad {
-                Some((output_rx, input_tx, master_arc, buf_arc)) => {
+                Some((output_rx, input_tx, master_arc, buf_arc, client_count_arc)) => {
                     if let Ok(lock) = master_arc.lock() {
                         if let Some(m) = lock.as_ref() {
                             let _ = m.0.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
@@ -392,7 +402,7 @@ async fn handle_ws_client(
                             }
                         }
                     };
-                    (output_rx, input_tx, master_arc, history_bytes)
+                    (output_rx, input_tx, master_arc, history_bytes, sid, client_count_arc)
                 }
                 None => {
                     let _ = sink.send(Message::Text(
@@ -419,6 +429,12 @@ async fn handle_ws_client(
     if sink.send(Message::Text(
         serde_json::json!({"type":"history_done","total_bytes":total_history}).to_string()
     )).await.is_err() { return; }
+
+    // Notify local UI that a remote client connected
+    let count = client_count_arc.fetch_add(1, Ordering::Relaxed) + 1;
+    app.emit("remote_client_change", RemoteClientEvent {
+        session_id: attached_session_id.clone(), count,
+    }).ok();
 
     // Forward real-time PTY output → WS client (forward task owns sink)
     let forward = tauri::async_runtime::spawn(async move {
@@ -458,6 +474,13 @@ async fn handle_ws_client(
     }
 
     forward.abort();
+
+    // Notify local UI that the remote client disconnected
+    let prev = client_count_arc.fetch_sub(1, Ordering::Relaxed);
+    let count = if prev == 0 { 0 } else { prev - 1 };
+    app.emit("remote_client_change", RemoteClientEvent {
+        session_id: attached_session_id, count,
+    }).ok();
 }
 
 fn start_ws_server(registry: Registry, app: AppHandle) {

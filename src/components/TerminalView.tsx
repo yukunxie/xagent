@@ -14,6 +14,7 @@ interface Props {
   wsUrl?:       string;       // if set: remote WebSocket session
   wsSessionId?: string;       // if set: attach to existing remote session
   historyMode?: HistoryMode;  // how much history to sync on attach
+  clientCount?: number;       // remote clients attached to this local session
   command?:     string;
   args?:        string[];
   cwd?:         string;
@@ -52,7 +53,7 @@ const REMOTE_THEME = {
   brightBlue:          "#4e9ee7", brightMagenta: "#c878be", brightCyan: "#00e2e2", brightWhite:  "#ffffff",
 };
 
-export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyMode, command, args, cwd }: Props) {
+export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyMode, clientCount = 0, command, args, cwd }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef      = useRef<Terminal | null>(null);
   const fitRef       = useRef<FitAddon | null>(null);
@@ -315,38 +316,55 @@ export function TerminalView({ sessionId, isActive, wsUrl, wsSessionId, historyM
     <div
       className="absolute inset-0 overflow-hidden"
       style={isRemote ? {
-        // PyCharm Darcula outer shell: subtle warm-grey border + matching background
         background:  "#2b2b2b",
-        borderTop:   "2px solid #4e7cbf",   // IntelliJ blue accent line at top
+        borderTop:   "2px solid #4e7cbf",
       } : {
         background: "#09090b",
       }}
       onClick={() => termRef.current?.focus()}
     >
       <div ref={containerRef} className="w-full h-full" />
-      {/* Remote indicator badge */}
-      {isRemote && (
-        <div style={{
-          position: "absolute", top: 6, left: 10,
-          background: "#214283", border: "1px solid #4e7cbf",
-          borderRadius: "0.25rem", padding: "1px 7px",
-          fontSize: "0.7rem", color: "#a9c9f5", letterSpacing: "0.04em",
-          pointerEvents: "none", zIndex: 10,
-        }}>
-          ⚡ REMOTE
-        </div>
-      )}
-      {loadingHistory && (
-        <div style={{
-          position: "absolute", top: 8, right: 12,
-          background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)",
-          border: "1px solid #3f3f46", borderRadius: "0.375rem",
-          padding: "2px 10px", fontSize: "0.75rem", color: "#a1a1aa",
-          pointerEvents: "none", zIndex: 10,
-        }}>
-          ⏳ 加载历史…
-        </div>
-      )}
+
+      {/* Top-right badge area */}
+      <div style={{
+        position: "absolute", top: 6, right: 10,
+        display: "flex", gap: "6px", alignItems: "center",
+        pointerEvents: "none", zIndex: 10,
+      }}>
+        {/* Loading history spinner */}
+        {loadingHistory && (
+          <div style={{
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)",
+            border: "1px solid #3f3f46", borderRadius: "0.25rem",
+            padding: "1px 8px", fontSize: "0.7rem", color: "#a1a1aa",
+          }}>
+            ⏳ 加载历史…
+          </div>
+        )}
+
+        {/* Remote session indicator */}
+        {isRemote && (
+          <div style={{
+            background: "#214283", border: "1px solid #4e7cbf",
+            borderRadius: "0.25rem", padding: "1px 7px",
+            fontSize: "0.7rem", color: "#a9c9f5", letterSpacing: "0.04em",
+          }}>
+            ⚡ REMOTE
+          </div>
+        )}
+
+        {/* Local session with connected clients */}
+        {!isRemote && clientCount > 0 && (
+          <div style={{
+            background: "rgba(250,204,21,0.12)", border: "1px solid #a16207",
+            borderRadius: "0.25rem", padding: "1px 7px",
+            fontSize: "0.7rem", color: "#fde047", letterSpacing: "0.04em",
+          }}>
+            🔗 {clientCount} 远端已连接
+          </div>
+        )}
+      </div>
+
       {prompt && (
         <PromptOverlay type={prompt} onSend={sendInput} onDismiss={clearPrompt} />
       )}
