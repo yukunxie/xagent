@@ -659,6 +659,35 @@ $dialogConnect.addEventListener('click', () => {
 });
 
 // ── Terminal ──────────────────────────────────────────────────────────────
+
+// Adapt the web xterm to the server's PTY dimensions.
+// If the server terminal is WIDER than the browser viewport, we scale the font
+// down so all columns fit — this prevents TUI content from being clipped.
+// If the server terminal is NARROWER, we use default font and leave empty space.
+function adaptToServerSize(sRows, sCols) {
+  if (!term || !fitAddon || sCols <= 0 || sRows <= 0) return;
+
+  // Reset to default font and measure the browser's natural column capacity
+  term.options.fontSize = TERM_FONT_SIZE;
+  fitAddon.fit();
+  const browserCols = term.cols;
+
+  if (sCols > browserCols && browserCols > 0) {
+    // Scale font down so all server cols fit in the viewport
+    const scaledSize = Math.max(6, Math.floor(TERM_FONT_SIZE * browserCols / sCols));
+    term.options.fontSize = scaledSize;
+    // requestAnimationFrame lets the browser re-measure char dimensions after
+    // the font size change, before we call fit() + resize()
+    requestAnimationFrame(() => {
+      if (!term || !fitAddon) return;
+      fitAddon.fit();
+      term.resize(sCols, sRows);
+    });
+  } else {
+    term.resize(sCols, sRows);
+  }
+}
+
 function openTerminal(session, hMode) {
   show('terminal');
 
@@ -705,9 +734,9 @@ function openTerminal(session, hMode) {
     resizeTimer = setTimeout(() => {
       if (!fitAddon || !term) return;
       if (serverTermSize) {
-        // Server owns the terminal size (local PTY session). Keep xterm at server's
-        // dimensions so TUI apps like opencode render correctly.
-        term.resize(serverTermSize.cols, serverTermSize.rows);
+        // Server owns the terminal size. Re-adapt in case browser window changed
+        // (font may need rescaling if the viewport width changed).
+        adaptToServerSize(serverTermSize.rows, serverTermSize.cols);
       } else {
         fitAddon.fit();
       }
@@ -741,14 +770,12 @@ function openTerminal(session, hMode) {
         }
         setTimeout(() => term?.scrollToBottom(), 100);
       } else if (msg.type === 'terminal_size') {
-        // Server tells us the actual PTY size BEFORE sending history.
-        // Lock our xterm to this size so TUI content renders correctly.
-        // Also cancel any pending fitAddon.fit() timer to prevent it from
-        // overwriting the server-specified size.
+        // Server tells us the actual PTY size (sent before history).
+        // Scale font + lock to server dims so TUI apps render correctly.
         if (term && msg.rows > 0 && msg.cols > 0) {
           if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
           serverTermSize = { rows: msg.rows, cols: msg.cols };
-          term.resize(msg.cols, msg.rows);
+          adaptToServerSize(msg.rows, msg.cols);
         }
       } else if (msg.type === 'exit') {
         term.writeln('\r\n\x1b[90m[remote process exited]\x1b[0m');

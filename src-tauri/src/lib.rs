@@ -135,11 +135,11 @@ fn resize_session(
     rows:       u16,
     cols:       u16,
 ) -> Result<(), String> {
-    let (master_arc, size_arc) = {
+    let (master_arc, size_arc, output_tx) = {
         let reg = state.registry.lock().unwrap();
         let s = reg.get(&session_id)
             .ok_or_else(|| format!("Session {} not found", session_id))?;
-        (Arc::clone(&s.master), Arc::clone(&s.pty_size))
+        (Arc::clone(&s.master), Arc::clone(&s.pty_size), s.output_tx.clone())
     };
     let lock = master_arc.lock().unwrap();
     if let Some(m) = lock.as_ref() {
@@ -148,6 +148,11 @@ fn resize_session(
     }
     // Keep stored size in sync so remote clients can be told the correct dimensions
     *size_arc.lock().unwrap() = (rows, cols);
+    // Notify all connected remote WS clients so they resize their own xterm to match.
+    // Without this, clients retain the old size and new PTY output garbles their display.
+    let _ = output_tx.send(
+        serde_json::json!({"type":"terminal_size","rows":rows,"cols":cols}).to_string()
+    );
     Ok(())
 }
 
