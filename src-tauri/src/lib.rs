@@ -428,8 +428,21 @@ async fn handle_ws_client(
         _ => return,
     };
 
-    // Stream history in 32 KB chunks; yield after each chunk so the async runtime
-    // can service other tasks and the WS back-pressure is respected naturally.
+    // ── Step 1: Tell the client the ACTUAL PTY size BEFORE sending history ───
+    // The client's xterm must be resized to the server's PTY dimensions first.
+    // If we send history first, xterm renders the content at the wrong width
+    // (client's own size) and TUI apps like opencode get garbled layouts.
+    {
+        let (pty_rows, pty_cols) = *pty_size_arc.lock().unwrap();
+        if sink.send(Message::Text(
+            serde_json::json!({"type":"terminal_size","rows":pty_rows,"cols":pty_cols}).to_string()
+        )).await.is_err() { return; }
+    }
+    // Small yield so the client has a chance to process the resize before the
+    // first history chunk arrives over the same TCP stream.
+    tokio::task::yield_now().await;
+
+    // ── Step 2: Stream history in 32 KB chunks ────────────────────────────────
     let total_history = history_bytes.len() as u64;
     for chunk in history_bytes.chunks(32 * 1024) {
         let data = base64::engine::general_purpose::STANDARD.encode(chunk);
@@ -442,16 +455,6 @@ async fn handle_ws_client(
     if sink.send(Message::Text(
         serde_json::json!({"type":"history_done","total_bytes":total_history}).to_string()
     )).await.is_err() { return; }
-
-    // Tell the remote client the actual PTY size so it can resize its own xterm to
-    // match. This is especially important for local sessions where the PTY size is
-    // controlled by the local display, not the remote client.
-    {
-        let (pty_rows, pty_cols) = *pty_size_arc.lock().unwrap();
-        let _ = sink.send(Message::Text(
-            serde_json::json!({"type":"terminal_size","rows":pty_rows,"cols":pty_cols}).to_string()
-        )).await;
-    }
 
     // Notify local UI that a remote client connected
     let count = client_count_arc.fetch_add(1, Ordering::Relaxed) + 1;

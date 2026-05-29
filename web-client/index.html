@@ -500,6 +500,7 @@ let connectedIp     = '';
 let offsetBytes     = 0;
 let resizeTimer     = null;
 let loadingHistory  = false;
+let serverTermSize  = null; // {rows, cols} locked by server terminal_size msg
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const $connectScreen  = document.getElementById('connect-screen');
@@ -669,6 +670,7 @@ function openTerminal(session, hMode) {
   $termContainer.innerHTML = '';
   offsetBytes = 0;
   loadingHistory = false;
+  serverTermSize = null; // reset server-locked size for new session
 
   // Create xterm
   term = new Terminal({
@@ -702,7 +704,13 @@ function openTerminal(session, hMode) {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (!fitAddon || !term) return;
-      fitAddon.fit();
+      if (serverTermSize) {
+        // Server owns the terminal size (local PTY session). Keep xterm at server's
+        // dimensions so TUI apps like opencode render correctly.
+        term.resize(serverTermSize.cols, serverTermSize.rows);
+      } else {
+        fitAddon.fit();
+      }
       if (ws?.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
     }, 150);
@@ -733,9 +741,13 @@ function openTerminal(session, hMode) {
         }
         setTimeout(() => term?.scrollToBottom(), 100);
       } else if (msg.type === 'terminal_size') {
-        // Server tells us the actual PTY size. Resize our xterm to match so that
-        // cursor-addressed output (e.g. Claude TUI) renders correctly.
+        // Server tells us the actual PTY size BEFORE sending history.
+        // Lock our xterm to this size so TUI content renders correctly.
+        // Also cancel any pending fitAddon.fit() timer to prevent it from
+        // overwriting the server-specified size.
         if (term && msg.rows > 0 && msg.cols > 0) {
+          if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+          serverTermSize = { rows: msg.rows, cols: msg.cols };
           term.resize(msg.cols, msg.rows);
         }
       } else if (msg.type === 'exit') {
