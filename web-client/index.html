@@ -264,6 +264,65 @@
   .xterm { height: 100% !important; }
   .xterm-viewport { overflow-y: hidden !important; }
 
+  /* ── Mobile virtual keyboard shortcuts bar ─────────────────────── */
+  #mobile-kb {
+    display: none;         /* only shown on touch devices */
+    flex-shrink: 0;
+    background: #1c1d20;
+    border-top: 1px solid #3a3d40;
+    padding: 5px 6px;
+    padding-bottom: max(5px, env(safe-area-inset-bottom, 5px));
+    gap: 5px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    align-items: center;
+  }
+  #mobile-kb::-webkit-scrollbar { display: none; }
+
+  .kb-btn {
+    flex-shrink: 0;
+    background: #3c3f41;
+    color: #c8cdd3;
+    border: 1px solid #505357;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    cursor: pointer;
+    min-width: 42px;
+    min-height: 36px;
+    text-align: center;
+    scroll-snap-align: start;
+    /* critical: prevent tap from stealing focus away from xterm */
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    transition: background 0.1s;
+  }
+  .kb-btn:active, .kb-btn.pressed { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .kb-sep {
+    width: 1px; height: 22px; background: #3a3d40;
+    flex-shrink: 0;
+  }
+
+  /* Show keyboard bar on touch-primary devices (phones / tablets) */
+  @media (hover: none) and (pointer: coarse) {
+    #mobile-kb { display: flex; }
+  }
+
+  /* ── Connect/dialog cards: fluid on narrow screens ──────────────── */
+  .connect-card { width: min(360px, calc(100% - 32px)); }
+  .dialog-card  { width: min(340px, calc(100% - 32px)); }
+
+  /* ── Small-screen layout tweaks ──────────────────────────────────── */
+  @media (max-width: 480px) {
+    .term-bar { padding: 4px 8px; }
+    .btn.btn-secondary, .btn.btn-danger { padding: 5px 10px; font-size: 0.78rem; }
+  }
+
   /* ── Scrollbar ───────────────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -324,10 +383,35 @@
     <span class="term-bar-title" id="term-bar-title">
       <strong>—</strong>
     </span>
+    <button class="btn btn-secondary" id="kb-show-btn" title="唤起键盘">⌨️</button>
     <button class="btn btn-secondary" id="back-btn">← 返回</button>
     <button class="btn btn-danger" id="disconnect-term-btn">断开</button>
   </div>
   <div id="terminal-container"></div>
+
+  <!-- Mobile shortcut keyboard bar — auto-shown on touch devices via CSS media query -->
+  <div id="mobile-kb">
+    <button class="kb-btn" data-key="esc">ESC</button>
+    <button class="kb-btn" data-key="tab">TAB</button>
+    <span class="kb-sep"></span>
+    <button class="kb-btn" data-key="ctrl-c">^C</button>
+    <button class="kb-btn" data-key="ctrl-d">^D</button>
+    <button class="kb-btn" data-key="ctrl-z">^Z</button>
+    <button class="kb-btn" data-key="ctrl-l">^L</button>
+    <span class="kb-sep"></span>
+    <button class="kb-btn" data-key="ctrl-a">^A</button>
+    <button class="kb-btn" data-key="ctrl-e">^E</button>
+    <button class="kb-btn" data-key="ctrl-u">^U</button>
+    <button class="kb-btn" data-key="ctrl-r">^R</button>
+    <span class="kb-sep"></span>
+    <button class="kb-btn" data-key="up">↑</button>
+    <button class="kb-btn" data-key="down">↓</button>
+    <button class="kb-btn" data-key="left">←</button>
+    <button class="kb-btn" data-key="right">→</button>
+    <span class="kb-sep"></span>
+    <button class="kb-btn" data-key="pgup">PgUp</button>
+    <button class="kb-btn" data-key="pgdn">PgDn</button>
+  </div>
 </div>
 
 <script>
@@ -347,6 +431,63 @@ function formatBytes(n) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
+
+// ── Touch device detection ─────────────────────────────────────────────────
+const isTouchDevice = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+// Smaller font on mobile so more content fits; still readable on high-DPI screens
+const TERM_FONT_SIZE = isTouchDevice ? 12 : 14;
+
+// ── Mobile keyboard key sequences ─────────────────────────────────────────
+const KEY_SEQ = {
+  'esc':    '\x1b',
+  'tab':    '\t',
+  'ctrl-c': '\x03',   // SIGINT / interrupt
+  'ctrl-d': '\x04',   // EOF / logout
+  'ctrl-z': '\x1a',   // SIGTSTP / suspend
+  'ctrl-l': '\x0c',   // clear screen
+  'ctrl-a': '\x01',   // beginning of line
+  'ctrl-e': '\x05',   // end of line
+  'ctrl-u': '\x15',   // clear to beginning of line
+  'ctrl-r': '\x12',   // reverse history search
+  'up':     '\x1b[A',
+  'down':   '\x1b[B',
+  'right':  '\x1b[C',
+  'left':   '\x1b[D',
+  'pgup':   '\x1b[5~',
+  'pgdn':   '\x1b[6~',
+};
+
+function sendKey(seq) {
+  if (ws?.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: 'input', data: encodeB64(seq) }));
+  // Re-focus terminal — keeps soft keyboard open and cursor active
+  term?.focus();
+}
+
+// Bind shortcut bar: use touchstart+preventDefault so the terminal never
+// loses focus when a shortcut button is tapped. Fall back to click for mouse.
+document.querySelectorAll('.kb-btn').forEach(btn => {
+  // touchstart: fire immediately, suppress focus change and mouse events
+  btn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    btn.classList.add('pressed');
+    const seq = KEY_SEQ[btn.dataset.key];
+    if (seq) sendKey(seq);
+  }, { passive: false });
+
+  btn.addEventListener('touchend', () => btn.classList.remove('pressed'));
+
+  // Fallback for desktop / mouse
+  btn.addEventListener('mousedown', e => {
+    if (e.pointerType === 'touch') return; // already handled above
+    e.preventDefault();
+    const seq = KEY_SEQ[btn.dataset.key];
+    if (seq) sendKey(seq);
+  });
+});
+
+// ⌨️ button: explicitly focus terminal to bring up soft keyboard on iOS/Android
+document.getElementById('kb-show-btn').addEventListener('click', () => term?.focus());
 
 // ── State ──────────────────────────────────────────────────────────────────
 let ws        = null;
@@ -539,7 +680,7 @@ function openTerminal(session, hMode) {
       brightYellow: '#ffe400', brightBlue: '#4e9ee7', brightMagenta: '#c878be',
       brightCyan: '#00e2e2', brightWhite: '#ffffff',
     },
-    fontSize: 14,
+    fontSize: TERM_FONT_SIZE,
     fontFamily: "'JetBrains Mono','Cascadia Code',Menlo,Monaco,Consolas,monospace",
     cursorBlink: true,
     allowProposedApi: true,
