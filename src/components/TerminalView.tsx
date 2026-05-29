@@ -8,11 +8,12 @@ import { PromptOverlay } from "./PromptOverlay";
 import { usePromptDetection } from "../hooks/usePromptDetection";
 
 interface Props {
-  sessionId: string;
-  wsUrl?:    string;   // if set: remote WebSocket session
-  command?:  string;
-  args?:     string[];
-  cwd?:      string;
+  sessionId:    string;
+  wsUrl?:       string;   // if set: remote WebSocket session
+  wsSessionId?: string;   // if set: attach to existing remote session
+  command?:     string;
+  args?:        string[];
+  cwd?:         string;
 }
 
 // Encode a JS string to base64 (UTF-8 safe)
@@ -23,7 +24,7 @@ function encodeBase64(str: string): string {
   return btoa(bin);
 }
 
-export function TerminalView({ sessionId, wsUrl, command, args, cwd }: Props) {
+export function TerminalView({ sessionId, wsUrl, wsSessionId, command, args, cwd }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef      = useRef<Terminal | null>(null);
   const fitRef       = useRef<FitAddon | null>(null);
@@ -77,14 +78,25 @@ export function TerminalView({ sessionId, wsUrl, command, args, cwd }: Props) {
 
       ws.onopen = () => {
         fitAddon.fit();
-        ws.send(JSON.stringify({
-          type: "init",
-          command: command ?? "pwsh",
-          args: args ?? [],
-          cwd: cwd ?? "",
-          rows: term.rows,
-          cols: term.cols,
-        }));
+        if (wsSessionId) {
+          // Attach to an existing remote session
+          ws.send(JSON.stringify({
+            type:       "attach",
+            session_id: wsSessionId,
+            rows:       term.rows,
+            cols:       term.cols,
+          }));
+        } else {
+          // Start a new session on the remote host
+          ws.send(JSON.stringify({
+            type:    "init",
+            command: command ?? "pwsh",
+            args:    args ?? [],
+            cwd:     cwd ?? "",
+            rows:    term.rows,
+            cols:    term.cols,
+          }));
+        }
         term.focus();
       };
 
@@ -167,7 +179,7 @@ export function TerminalView({ sessionId, wsUrl, command, args, cwd }: Props) {
     }
 
     return cleanup;
-  }, [sessionId, wsUrl]);
+  }, [sessionId, wsUrl, wsSessionId]);
 
   const sendInput = (text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

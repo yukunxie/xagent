@@ -6,5 +6,6 @@ export interface SessionInfo {
   cwd: string;
   status: "running" | "exited";
   created_at: number;
-  wsUrl?: string; // set for remote sessions
+  wsUrl?: string;       // set for remote WS sessions
+  wsSessionId?: string; // if set: attach to this existing remote session ID
 }

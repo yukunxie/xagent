@@ -42,7 +42,7 @@ export default function App() {
     };
   }, []);
 
-  const handleCreate = async (name: string, command: string, args: string[], cwd: string, wsUrl?: string) => {
+  const handleCreate = async (name: string, command: string, args: string[], cwd: string, wsUrl?: string, wsSessionId?: string) => {
     const next: SessionInfo = {
       id: "",
       name,
@@ -52,6 +52,7 @@ export default function App() {
       status: "running",
       created_at: Date.now() / 1000,
       wsUrl,
+      wsSessionId,
     };
 
     if (wsUrl) {
@@ -108,6 +109,7 @@ export default function App() {
               key={activeId}
               sessionId={activeId}
               wsUrl={s?.wsUrl}
+              wsSessionId={s?.wsSessionId}
               command={s?.command}
               args={s?.args}
               cwd={s?.cwd}
