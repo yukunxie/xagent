@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>xAgent — AI 助手</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+
+  :root {
+    --bg:       #0d0d0f;
+    --surface:  #18181c;
+    --border:   #2a2a32;
+    --accent:   #7c6af7;
+    --accent2:  #5a52cc;
+    --text:     #e8e8f0;
+    --muted:    #888;
+    --user-bg:  #1e1b3a;
+    --tool-bg:  #141820;
+    --success:  #3d9e6b;
+    --warn:     #c97f2e;
+    --error:    #c0392b;
+    --radius:   12px;
+    --safe-b:   env(safe-area-inset-bottom, 0px);
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; font-size: 15px; }
+
+  /* ── Layout ── */
+  #app       { display: flex; flex-direction: column; height: 100dvh; }
+  #header    { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #header h1 { font-size: 16px; font-weight: 600; flex: 1 }
+  #status-dot{ width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0 }
+  #status-dot.connected   { background: var(--success) }
+  #status-dot.busy        { background: var(--accent); animation: pulse 1s infinite }
+  #status-dot.retry       { background: var(--warn); animation: pulse 1s infinite }
+
+  #session-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0 }
+  #session-bar::-webkit-scrollbar { display: none }
+  .session-chip { flex-shrink: 0; padding: 4px 10px; border-radius: 20px; background: var(--bg); border: 1px solid var(--border); font-size: 12px; cursor: pointer; color: var(--muted); white-space: nowrap; transition: .15s }
+  .session-chip.active { background: var(--accent2); border-color: var(--accent); color: #fff; }
+  #btn-new-session { flex-shrink: 0; padding: 4px 10px; border-radius: 20px; background: none; border: 1px dashed var(--border); font-size: 12px; cursor: pointer; color: var(--muted) }
+  #btn-new-session:active { background: var(--surface) }
+
+  #chat      { flex: 1; overflow-y: auto; padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 12px; }
+  #chat::-webkit-scrollbar { width: 4px }
+  #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px }
+
+  #input-area { display: flex; gap: 8px; align-items: flex-end; padding: 8px 10px calc(8px + var(--safe-b)); background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+  #prompt     { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; color: var(--text); font-size: 15px; resize: none; max-height: 160px; min-height: 42px; line-height: 1.4; outline: none; -webkit-text-security: none; autocomplete: off; }
+  #prompt:focus { border-color: var(--accent) }
+  #btn-send   { flex-shrink: 0; width: 42px; height: 42px; border-radius: 50%; background: var(--accent); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; transition: .15s; }
+  #btn-send:active { background: var(--accent2) }
+  #btn-send.busy { background: var(--error) }
+
+  /* ── Messages ── */
+  .msg        { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+  .msg.user   { align-items: flex-end }
+  .msg.assistant { align-items: flex-start }
+  .bubble     { padding: 9px 13px; border-radius: var(--radius); line-height: 1.5; word-break: break-word; white-space: pre-wrap; }
+  .msg.user .bubble   { background: var(--user-bg); border-bottom-right-radius: 4px; }
+  .msg.assistant .bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .bubble.streaming::after { content: '▋'; animation: blink .6s step-end infinite; opacity: .8; }
+
+  /* ── Tool cards ── */
+  .tool-card  { background: var(--tool-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; font-size: 13px; max-width: 380px; width: 100%; }
+  .tool-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .tool-icon  { font-size: 15px }
+  .tool-name  { font-weight: 600; flex: 1; color: var(--muted); }
+  .tool-status{ font-size: 11px; padding: 1px 6px; border-radius: 10px; }
+  .tool-status.pending { background: #2a2520; color: var(--warn) }
+  .tool-status.running { background: #1e1a2e; color: var(--accent); animation: pulse 1s infinite }
+  .tool-status.done    { background: #162616; color: var(--success) }
+  .tool-status.error   { background: #2a1616; color: var(--error) }
+  .tool-detail { color: var(--muted); font-family: monospace; font-size: 12px; max-height: 80px; overflow-y: auto; }
+  .tool-detail.expandable { cursor: pointer }
+  .tool-detail.expandable.collapsed { -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; max-height: none }
+
+  /* ── Permission dialog ── */
+  #permission-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 100; align-items: flex-end; }
+  #permission-overlay.visible { display: flex }
+  #permission-dialog  { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; padding: 20px 16px calc(20px + var(--safe-b)); width: 100%; max-width: 520px; margin: 0 auto; }
+  #permission-title   { font-size: 16px; font-weight: 700; margin-bottom: 8px }
+  #permission-desc    { font-size: 13px; color: var(--muted); margin-bottom: 12px; line-height: 1.5 }
+  #permission-patterns { list-style: none; margin-bottom: 16px }
+  #permission-patterns li { font-family: monospace; font-size: 12px; background: var(--tool-bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; word-break: break-all; }
+  .perm-btns  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px }
+  .perm-btn   { padding: 11px 6px; border-radius: 10px; border: none; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .perm-btn.once   { background: var(--accent);  color: #fff }
+  .perm-btn.always { background: #1c2e1c; color: var(--success); border: 1px solid var(--success) }
+  .perm-btn.reject { background: #2e1c1c; color: var(--error);   border: 1px solid var(--error) }
+
+  /* ── Connect overlay ── */
+  #connect-overlay { display: flex; position: fixed; inset: 0; background: var(--bg); z-index: 200; align-items: center; justify-content: center; }
+  #connect-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px 24px; width: min(360px, 92vw); }
+  #connect-box h2 { font-size: 18px; margin-bottom: 6px }
+  #connect-box p  { font-size: 13px; color: var(--muted); margin-bottom: 16px }
+  .conn-field { margin-bottom: 10px }
+  .conn-field label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px }
+  .conn-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; color: var(--text); font-size: 14px; outline: none; }
+  .conn-input:focus { border-color: var(--accent) }
+  #btn-connect { width: 100%; padding: 11px; border-radius: 10px; background: var(--accent); border: none; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px }
+  #btn-connect:active { background: var(--accent2) }
+  #connect-error { color: var(--error); font-size: 12px; margin-top: 8px; text-align: center }
+
+  /* ── Reasoning (collapsible) ── */
+  .reasoning-wrap { font-size: 12px; color: var(--muted); max-width: 380px }
+  .reasoning-toggle { cursor: pointer; user-select: none; padding: 4px 0 }
+  .reasoning-content { display: none; font-family: monospace; white-space: pre-wrap; background: var(--tool-bg); border-radius: 6px; padding: 8px; margin-top: 4px; max-height: 200px; overflow-y: auto }
+  .reasoning-content.open { display: block }
+
+  /* ── Utility ── */
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+  @keyframes blink { 50% { opacity: 0 } }
+  .hidden { display: none !important }
+</style>
+</head>
+<body>
+
+<!-- Connect overlay (shown on first load / disconnect) -->
+<div id="connect-overlay">
+  <div id="connect-box">
+    <h2>连接到 xAgent</h2>
+    <p>输入运行 opencode-bridge 的主机地址</p>
+    <div class="conn-field">
+      <label>Bridge 地址</label>
+      <input id="bridge-url-input" class="conn-input" type="url"
+        placeholder="ws://192.168.1.x:9001"
+        autocomplete="url" autocorrect="off" autocapitalize="none" spellcheck="false">
+    </div>
+    <button id="btn-connect">连接</button>
+    <div id="connect-error"></div>
+  </div>
+</div>
+
+<!-- Permission dialog -->
+<div id="permission-overlay">
+  <div id="permission-dialog">
+    <div id="permission-title">需要授权</div>
+    <div id="permission-desc"></div>
+    <ul id="permission-patterns"></ul>
+    <div class="perm-btns">
+      <button class="perm-btn reject" id="perm-reject">拒绝</button>
+      <button class="perm-btn once"   id="perm-once">允许一次</button>
+      <button class="perm-btn always" id="perm-always">始终允许</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main UI -->
+<div id="app">
+  <div id="header">
+    <span id="status-dot"></span>
+    <h1>xAgent</h1>
+    <button id="btn-disconnect" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">断开</button>
+  </div>
+
+  <div id="session-bar">
+    <button id="btn-new-session">＋ 新会话</button>
+  </div>
+
+  <div id="chat"></div>
+
+  <div id="input-area">
+    <textarea id="prompt" rows="1" placeholder="输入消息…"
+      autocomplete="off" autocorrect="off" autocapitalize="sentences" spellcheck="false"></textarea>
+    <button id="btn-send">↑</button>
+  </div>
+</div>
+
+<script>
+// ── Storage ──────────────────────────────────────────────────────────────────
+const LS_URL_KEY = 'xagent_bridge_url'
+const savedUrl   = localStorage.getItem(LS_URL_KEY)
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws            = null
+let currentSid    = null      // current session id
+let isBusy        = false
+let pendingPermId = null
+const sessions    = new Map() // sid → {id, title, status}
+
+// live text/reasoning streamed in current message
+const liveText    = new Map() // partId → {el, text}
+const liveReason  = new Map() // partId → {wrapEl, contentEl, text}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+const overlay      = document.getElementById('connect-overlay')
+const urlInput     = document.getElementById('bridge-url-input')
+const connectErr   = document.getElementById('connect-error')
+const chat         = document.getElementById('chat')
+const prompt       = document.getElementById('prompt')
+const btnSend      = document.getElementById('btn-send')
+const btnDisconn   = document.getElementById('btn-disconnect')
+const btnNewSess   = document.getElementById('btn-new-session')
+const sessionBar   = document.getElementById('session-bar')
+const statusDot    = document.getElementById('status-dot')
+const permOverlay  = document.getElementById('permission-overlay')
+const permDesc     = document.getElementById('permission-desc')
+const permPatterns = document.getElementById('permission-patterns')
+const permReject   = document.getElementById('perm-reject')
+const permOnce     = document.getElementById('perm-once')
+const permAlways   = document.getElementById('perm-always')
+
+if (savedUrl) {
+  urlInput.value = savedUrl
+  connectToBridge(savedUrl)
+}
+
+// ── Connect ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-connect').addEventListener('click', () => {
+  const url = urlInput.value.trim()
+  if (!url) return
+  connectToBridge(url)
+})
+urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('btn-connect').click() })
+
+function connectToBridge(url) {
+  connectErr.textContent = ''
+  try { ws = new WebSocket(url) } catch(e) { connectErr.textContent = '地址格式有误'; return }
+
+  ws.onopen = () => {
+    localStorage.setItem(LS_URL_KEY, url)
+    overlay.classList.add('hidden')
+    statusDot.className = 'connected'
+  }
+
+  ws.onmessage = e => handleServerMsg(JSON.parse(e.data))
+
+  ws.onerror = () => { connectErr.textContent = '连接失败，请检查地址和网络' }
+  ws.onclose = () => {
+    statusDot.className = ''
+    if (!overlay.classList.contains('hidden')) return // already showing
+    // Brief delay before showing connect overlay again
+    setTimeout(() => overlay.classList.remove('hidden'), 800)
+  }
+}
+
+btnDisconn.addEventListener('click', () => {
+  ws?.close()
+  overlay.classList.remove('hidden')
+})
+
+// ── Send message ─────────────────────────────────────────────────────────────
+function sendMsg(msg) { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)) }
+
+btnSend.addEventListener('click', submitPrompt)
+prompt.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt() }
+})
+// Auto-grow textarea
+prompt.addEventListener('input', () => {
+  prompt.style.height = 'auto'
+  prompt.style.height = Math.min(prompt.scrollHeight, 160) + 'px'
+})
+
+function submitPrompt() {
+  if (isBusy) { sendMsg({ type: 'session.abort', session_id: currentSid }); return }
+  const text = prompt.value.trim()
+  if (!text || !currentSid) return
+  sendMsg({ type: 'session.prompt', session_id: currentSid, text })
+  prompt.value = ''
+  prompt.style.height = 'auto'
+}
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+btnNewSess.addEventListener('click', () => sendMsg({ type: 'session.create' }))
+
+function renderSessionBar() {
+  // Clear chips (keep the new button)
+  [...sessionBar.querySelectorAll('.session-chip')].forEach(c => c.remove())
+  for (const [sid, s] of sessions) {
+    const chip = document.createElement('button')
+    chip.className = 'session-chip' + (sid === currentSid ? ' active' : '')
+    chip.textContent = s.title.length > 20 ? s.title.slice(0, 20) + '…' : s.title
+    chip.dataset.sid = sid
+    chip.addEventListener('click', () => switchSession(sid))
+    sessionBar.insertBefore(chip, btnNewSess)
+  }
+}
+
+function switchSession(sid) {
+  currentSid = sid
+  chat.innerHTML = ''
+  liveText.clear()
+  liveReason.clear()
+  renderSessionBar()
+  // TODO: request history from bridge (not yet implemented)
+}
+
+// ── Server messages ───────────────────────────────────────────────────────────
+function handleServerMsg(msg) {
+  switch (msg.type) {
+    case 'bridge.ready':
+      break
+
+    case 'session.list': {
+      sessions.clear()
+      for (const s of msg.sessions) sessions.set(s.id, s)
+      if (!currentSid && msg.sessions.length > 0) {
+        currentSid = msg.sessions[msg.sessions.length - 1].id
+      }
+      renderSessionBar()
+      break
+    }
+
+    case 'session.created': {
+      sessions.set(msg.session.id, msg.session)
+      currentSid = msg.session.id
+      chat.innerHTML = ''
+      renderSessionBar()
+      break
+    }
+
+    case 'session.updated': {
+      const s = sessions.get(msg.session_id)
+      if (s && msg.title) { s.title = msg.title; renderSessionBar() }
+      break
+    }
+
+    case 'session.status': {
+      if (msg.session_id !== currentSid) break
+      isBusy = msg.status === 'busy' || msg.status === 'retry'
+      statusDot.className = isBusy ? (msg.status === 'retry' ? 'retry connected' : 'busy connected') : 'connected'
+      btnSend.textContent = isBusy ? '■' : '↑'
+      btnSend.className   = isBusy ? 'busy' : ''
+      // Finalize any streaming bubbles when idle
+      if (!isBusy) finalizeStreaming()
+      break
+    }
+
+    case 'session.error': {
+      if (msg.session_id !== currentSid) break
+      appendError(msg.error)
+      break
+    }
+
+    case 'user.message': {
+      if (msg.session_id !== currentSid) break
+      appendUserBubble(msg.text)
+      break
+    }
+
+    case 'text.delta': {
+      if (msg.session_id !== currentSid) break
+      appendTextDelta(msg.part_id, msg.message_id, msg.delta)
+      break
+    }
+
+    case 'text.done': {
+      if (msg.session_id !== currentSid) break
+      finalizePart(msg.part_id)
+      break
+    }
+
+    case 'reasoning.delta': {
+      if (msg.session_id !== currentSid) break
+      appendReasoningDelta(msg.part_id, msg.delta)
+      break
+    }
+
+    case 'tool.pending':
+    case 'tool.running':
+    case 'tool.done':
+    case 'tool.error': {
+      if (msg.session_id !== currentSid) break
+      upsertToolCard(msg)
+      break
+    }
+
+    case 'permission.asked': {
+      if (msg.session_id !== currentSid) break
+      showPermissionDialog(msg)
+      break
+    }
+
+    case 'permission.replied': {
+      if (pendingPermId === msg.id) hidePermissionDialog()
+      break
+    }
+  }
+}
+
+// ── Chat rendering ────────────────────────────────────────────────────────────
+function appendUserBubble(text) {
+  const div = document.createElement('div')
+  div.className = 'msg user'
+  div.innerHTML = `<div class="bubble">${escHtml(text)}</div>`
+  chat.appendChild(div)
+  scrollBottom()
+}
+
+function appendTextDelta(partId, msgId, delta) {
+  if (!liveText.has(partId)) {
+    // Create a new assistant bubble for this part
+    const div = document.createElement('div')
+    div.className = 'msg assistant'
+    const bubble = document.createElement('div')
+    bubble.className = 'bubble streaming'
+    bubble.id = 'part-' + partId
+    div.appendChild(bubble)
+    chat.appendChild(div)
+    liveText.set(partId, { el: bubble, text: '' })
+  }
+  const entry = liveText.get(partId)
+  entry.text += delta
+  entry.el.textContent = entry.text
+  scrollBottom()
+}
+
+function finalizePart(partId) {
+  const entry = liveText.get(partId)
+  if (entry) { entry.el.classList.remove('streaming'); liveText.delete(partId) }
+}
+
+function finalizeStreaming() {
+  for (const [pid, e] of liveText) e.el.classList.remove('streaming')
+  liveText.clear()
+}
+
+function appendReasoningDelta(partId, delta) {
+  if (!liveReason.has(partId)) {
+    const wrap = document.createElement('div')
+    wrap.className = 'reasoning-wrap msg assistant'
+    const toggle = document.createElement('div')
+    toggle.className = 'reasoning-toggle'
+    toggle.innerHTML = '💭 <span>思考中…</span>'
+    const content = document.createElement('div')
+    content.className = 'reasoning-content'
+    wrap.appendChild(toggle)
+    wrap.appendChild(content)
+    toggle.addEventListener('click', () => content.classList.toggle('open'))
+    chat.appendChild(wrap)
+    liveReason.set(partId, { wrapEl: wrap, contentEl: content, text: '' })
+  }
+  const r = liveReason.get(partId)
+  r.text += delta
+  r.contentEl.textContent = r.text
+  scrollBottom()
+}
+
+const toolCards = new Map() // partId → card element
+
+function upsertToolCard(msg) {
+  let card = toolCards.get(msg.part_id)
+  if (!card) {
+    const wrap = document.createElement('div')
+    wrap.className = 'msg assistant'
+    card = document.createElement('div')
+    card.className = 'tool-card'
+    card.id = 'tool-' + msg.part_id
+    wrap.appendChild(card)
+    chat.appendChild(wrap)
+    toolCards.set(msg.part_id, card)
+  }
+
+  const statusMap = { 'tool.pending': 'pending', 'tool.running': 'running', 'tool.done': 'done', 'tool.error': 'error' }
+  const iconMap   = { 'tool.pending': '⏳', 'tool.running': '⚙️', 'tool.done': '✅', 'tool.error': '❌' }
+  const labelMap  = { 'tool.pending': '等待', 'tool.running': '执行中', 'tool.done': '完成', 'tool.error': '出错' }
+
+  const st = statusMap[msg.type]
+  const detail = msg.type === 'tool.done'  ? (msg.output  || '') :
+                 msg.type === 'tool.error' ? (msg.error   || '') :
+                 msg.input ? JSON.stringify(msg.input, null, 2) : ''
+
+  card.innerHTML = `
+    <div class="tool-header">
+      <span class="tool-icon">${iconMap[msg.type]}</span>
+      <span class="tool-name">${escHtml(msg.tool)}</span>
+      <span class="tool-status ${st}">${labelMap[msg.type]}</span>
+    </div>
+    ${msg.title ? `<div style="font-size:12px;margin-bottom:6px;color:var(--text)">${escHtml(msg.title)}</div>` : ''}
+    ${detail ? `<div class="tool-detail expandable collapsed" onclick="this.classList.toggle('collapsed')">${escHtml(detail.slice(0, 2000))}</div>` : ''}
+  `
+  scrollBottom()
+}
+
+function appendError(errText) {
+  const div = document.createElement('div')
+  div.style.cssText = 'color:var(--error);font-size:12px;padding:4px 6px'
+  div.textContent = '⚠ ' + errText
+  chat.appendChild(div)
+  scrollBottom()
+}
+
+function scrollBottom() {
+  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight })
+}
+
+// ── Permission dialog ─────────────────────────────────────────────────────────
+function showPermissionDialog(msg) {
+  pendingPermId = msg.id
+  const permMap = { write: '写入文件', execute: '执行命令', read: '读取文件', bash: '执行 Shell', browser: '使用浏览器' }
+  permDesc.textContent = `Agent 需要 "${permMap[msg.permission] ?? msg.permission}" 权限`
+  permPatterns.innerHTML = (msg.patterns ?? []).map(p => `<li>${escHtml(p)}</li>`).join('')
+  permOverlay.classList.add('visible')
+
+  const reply = (r) => { sendMsg({ type: 'permission.reply', id: msg.id, reply: r }); hidePermissionDialog() }
+  permReject.onclick = () => reply('reject')
+  permOnce.onclick   = () => reply('once')
+  permAlways.onclick = () => reply('always')
+}
+
+function hidePermissionDialog() {
+  permOverlay.classList.remove('visible')
+  pendingPermId = null
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+</script>
+</body>
+</html>
