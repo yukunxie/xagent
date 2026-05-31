@@ -208,15 +208,15 @@ function CloseConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; onC
 function EmptyState({ onNew }: { onNew: () => void }) {
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-zinc-500">
-      <div className="text-5xl">⌨️</div>
+      <div className="text-5xl">🤖</div>
       <p className="text-sm">还没有会话</p>
       <button
         onClick={onNew}
-        className="px-4 py-2 text-sm bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-md text-zinc-300 transition-colors"
+        className="px-4 py-2 text-sm bg-violet-700 hover:bg-violet-600 border border-violet-600 rounded-md text-zinc-100 transition-colors"
       >
-        + 新建会话
+        + 新建 opencode 会话
       </button>
-      <p className="text-xs text-zinc-700">支持 claude、copilot-cli、pwsh 等任意 CLI</p>
+      <p className="text-xs text-zinc-700">手机/浏览器可通过 agent.html 同步查看</p>
     </div>
   );
 }
