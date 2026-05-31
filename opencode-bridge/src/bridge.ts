@@ -77,7 +77,7 @@ export class Bridge {
         }
 
         case 'session.create': {
-          const session = await this.opencode.createSession()
+          const session = await this.opencode.createSession(msg.directory)
           this.sessions.set(session.id, { ...session, status: 'idle' })
           this.broadcast({ type: 'session.created', session })
           break

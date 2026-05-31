@@ -44,12 +44,20 @@ export class OpenCodeClient {
     }))
   }
 
-  async createSession(): Promise<SessionInfo> {
-    const s: any = await this.request('POST', '/session', {})
+  async createSession(directory?: string): Promise<SessionInfo> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-opencode-directory': encodeURIComponent(directory ?? this.directory),
+    }
+    const res = await fetch(`${this.url}/session`, {
+      method: 'POST', headers, body: JSON.stringify({}),
+    })
+    if (!res.ok) throw new Error(`opencode API POST /session → ${res.status}: ${await res.text()}`)
+    const s: any = await res.json()
     return {
       id: s.id,
       title: s.title || '(untitled)',
-      directory: this.directory,
+      directory: directory ?? this.directory,
       status: 'idle',
       created_at: s.time?.created ?? Date.now(),
     }

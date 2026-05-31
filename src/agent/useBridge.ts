@@ -251,7 +251,7 @@ export function useBridge() {
     sendRaw({ type: 'session.prompt', session_id: currentSidRef.current, text })
   }, [sendRaw])
 
-  const createSession = useCallback(() => sendRaw({ type: 'session.create' }), [sendRaw])
+  const createSession = useCallback((directory?: string) => sendRaw({ type: 'session.create', directory }), [sendRaw])
   const abortSession  = useCallback(() => {
     if (currentSidRef.current) sendRaw({ type: 'session.abort', session_id: currentSidRef.current })
   }, [sendRaw])
@@ -266,5 +266,7 @@ export function useBridge() {
     msgs: (currentSid ? msgs.get(currentSid) : undefined) ?? [],
     isBusy, pending,
     sendPrompt, createSession, abortSession, replyPermission,
+    savedDir: localStorage.getItem('xagent_last_dir') ?? '',
+    saveDir: (d: string) => localStorage.setItem('xagent_last_dir', d),
   }
 }

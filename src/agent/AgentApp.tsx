@@ -1,17 +1,33 @@
-import { useBridge } from './useBridge'
-import ConnectOverlay   from './ConnectOverlay'
-import SessionBar       from './SessionBar'
-import ChatView         from './ChatView'
-import PermissionDialog from './PermissionDialog'
-import InputBar         from './InputBar'
+import { useState } from 'react'
+import { useBridge }       from './useBridge'
+import ConnectOverlay      from './ConnectOverlay'
+import SessionBar          from './SessionBar'
+import ChatView            from './ChatView'
+import PermissionDialog    from './PermissionDialog'
+import InputBar            from './InputBar'
+import NewSessionOverlay   from './NewSessionOverlay'
 
 export default function AgentApp() {
+  const [showNew, setShowNew] = useState(false)
+
   const {
     connectState, connect,
     sessions, currentSid, selectSession,
     msgs, isBusy, pending,
     sendPrompt, createSession, abortSession, replyPermission,
+    savedDir, saveDir,
   } = useBridge()
+
+  const handleNew = (dir: string) => {
+    saveDir(dir)
+    createSession(dir || undefined)
+    setShowNew(false)
+  }
+
+  const handleRestore = (sid: string) => {
+    selectSession(sid)
+    setShowNew(false)
+  }
 
   return (
     <div style={{
@@ -29,7 +45,7 @@ export default function AgentApp() {
           sessions={sessions}
           currentSid={currentSid}
           onSelect={selectSession}
-          onNew={createSession}
+          onNew={() => setShowNew(true)}
         />
       )}
 
@@ -41,17 +57,14 @@ export default function AgentApp() {
         }}>
           <div style={{ fontSize: 40 }}>🤖</div>
           <div style={{ color: '#e6edf3', fontSize: 18, fontWeight: 600 }}>xAgent</div>
-          <div style={{ color: '#7d8590', fontSize: 13, textAlign: 'center', maxWidth: 280, lineHeight: 1.6 }}>
-            还没有会话，点击下方按钮开始
-          </div>
           <button
-            onClick={createSession}
+            onClick={() => setShowNew(true)}
             style={{
               background: '#238636', border: 'none', borderRadius: 8,
               color: '#fff', padding: '10px 24px', fontSize: 14, cursor: 'pointer',
             }}
           >
-            ＋ 新建会话
+            ＋ 新建 opencode 会话
           </button>
         </div>
       )}
@@ -67,6 +80,17 @@ export default function AgentApp() {
             disabled={connectState !== 'connected'}
           />
         </>
+      )}
+
+      {/* 新建/恢复会话弹窗 */}
+      {showNew && (
+        <NewSessionOverlay
+          sessions={sessions}
+          savedDir={savedDir}
+          onNew={handleNew}
+          onRestore={handleRestore}
+          onClose={() => setShowNew(false)}
+        />
       )}
 
       {/* 权限弹窗 */}
