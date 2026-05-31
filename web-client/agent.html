@@ -92,16 +92,21 @@
 
   /* ── Connect overlay ── */
   #connect-overlay { display: flex; position: fixed; inset: 0; background: var(--bg); z-index: 200; align-items: center; justify-content: center; }
-  #connect-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px 24px; width: min(360px, 92vw); }
-  #connect-box h2 { font-size: 18px; margin-bottom: 6px }
-  #connect-box p  { font-size: 13px; color: var(--muted); margin-bottom: 16px }
-  .conn-field { margin-bottom: 10px }
-  .conn-field label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px }
-  .conn-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; color: var(--text); font-size: 14px; outline: none; }
-  .conn-input:focus { border-color: var(--accent) }
-  #btn-connect { width: 100%; padding: 11px; border-radius: 10px; background: var(--accent); border: none; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px }
+  #connect-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px 24px; width: min(360px, 92vw); text-align: center; }
+  #connect-box h2 { font-size: 18px; margin-bottom: 8px }
+  #connect-status { font-size: 13px; color: var(--muted); margin-bottom: 20px; min-height: 20px }
+  #connect-spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 16px }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  /* IP input row (hidden until connection fails) */
+  #ip-row { display: none; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 10px }
+  #ip-row.visible { display: flex }
+  #ip-prefix { padding: 9px 8px 9px 12px; color: var(--muted); font-size: 14px; white-space: nowrap; user-select: none }
+  #ip-input { flex: 1; background: transparent; border: none; padding: 9px 4px; color: var(--text); font-size: 14px; outline: none; min-width: 0 }
+  #ip-suffix { padding: 9px 12px 9px 4px; color: var(--muted); font-size: 14px; white-space: nowrap; user-select: none }
+  #btn-connect { width: 100%; padding: 11px; border-radius: 10px; background: var(--accent); border: none; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; display: none }
+  #btn-connect.visible { display: block }
   #btn-connect:active { background: var(--accent2) }
-  #connect-error { color: var(--error); font-size: 12px; margin-top: 8px; text-align: center }
+  #connect-error { color: var(--error); font-size: 12px; margin-top: 8px; }
 
   /* ── Reasoning (collapsible) ── */
   .reasoning-wrap { font-size: 12px; color: var(--muted); max-width: 380px }
@@ -117,16 +122,18 @@
 </head>
 <body>
 
-<!-- Connect overlay (shown on first load / disconnect) -->
+<!-- Connect overlay: auto-connects, shows IP input only on failure -->
 <div id="connect-overlay">
   <div id="connect-box">
-    <h2>连接到 xAgent</h2>
-    <p>输入运行 opencode-bridge 的主机地址</p>
-    <div class="conn-field">
-      <label>Bridge 地址</label>
-      <input id="bridge-url-input" class="conn-input" type="url"
-        placeholder="ws://192.168.1.x:9001"
-        autocomplete="url" autocorrect="off" autocapitalize="none" spellcheck="false">
+    <h2>xAgent</h2>
+    <div id="connect-spinner"></div>
+    <div id="connect-status">正在连接…</div>
+    <div id="ip-row">
+      <span id="ip-prefix">ws://</span>
+      <input id="ip-input" type="text" inputmode="decimal"
+        placeholder="192.168.1.x"
+        autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+      <span id="ip-suffix">:9001</span>
     </div>
     <button id="btn-connect">连接</button>
     <div id="connect-error"></div>
@@ -170,24 +177,28 @@
 
 <script>
 // ── Storage ──────────────────────────────────────────────────────────────────
-const LS_URL_KEY = 'xagent_bridge_url'
-const savedUrl   = localStorage.getItem(LS_URL_KEY)
+const LS_IP_KEY      = 'xagent_bridge_ip'
+const DEFAULT_IP     = '127.0.0.1'
+const BRIDGE_PORT    = 9001
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let ws            = null
-let currentSid    = null      // current session id
+let currentSid    = null
 let isBusy        = false
 let pendingPermId = null
-const sessions    = new Map() // sid → {id, title, status}
+const sessions    = new Map()
 
-// live text/reasoning streamed in current message
-const liveText    = new Map() // partId → {el, text}
-const liveReason  = new Map() // partId → {wrapEl, contentEl, text}
+const liveText    = new Map()
+const liveReason  = new Map()
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+// ── DOM refs ──────────────────────────────────────────────────────────────────
 const overlay      = document.getElementById('connect-overlay')
-const urlInput     = document.getElementById('bridge-url-input')
+const ipInput      = document.getElementById('ip-input')
+const ipRow        = document.getElementById('ip-row')
+const btnConnect   = document.getElementById('btn-connect')
 const connectErr   = document.getElementById('connect-error')
+const connectStatus= document.getElementById('connect-status')
+const connectSpinner=document.getElementById('connect-spinner')
 const chat         = document.getElementById('chat')
 const prompt       = document.getElementById('prompt')
 const btnSend      = document.getElementById('btn-send')
@@ -202,42 +213,76 @@ const permReject   = document.getElementById('perm-reject')
 const permOnce     = document.getElementById('perm-once')
 const permAlways   = document.getElementById('perm-always')
 
-if (savedUrl) {
-  urlInput.value = savedUrl
-  connectToBridge(savedUrl)
-}
+// ── Auto-connect on load ──────────────────────────────────────────────────────
+const savedIp = localStorage.getItem(LS_IP_KEY) || DEFAULT_IP
+connectToBridge(savedIp)
 
 // ── Connect ───────────────────────────────────────────────────────────────────
-document.getElementById('btn-connect').addEventListener('click', () => {
-  const url = urlInput.value.trim()
-  if (!url) return
-  connectToBridge(url)
+btnConnect.addEventListener('click', () => {
+  const ip = ipInput.value.trim() || DEFAULT_IP
+  connectToBridge(ip)
 })
-urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('btn-connect').click() })
+ipInput.addEventListener('keydown', e => { if (e.key === 'Enter') btnConnect.click() })
 
-function connectToBridge(url) {
+function showConnecting(msg = '正在连接…') {
+  connectStatus.textContent = msg
+  connectSpinner.style.display = 'inline-block'
+  ipRow.classList.remove('visible')
+  btnConnect.classList.remove('visible')
   connectErr.textContent = ''
-  try { ws = new WebSocket(url) } catch(e) { connectErr.textContent = '地址格式有误'; return }
+}
+
+function showConnectFailed(ip) {
+  connectSpinner.style.display = 'none'
+  connectStatus.textContent = '连接失败，请输入主机 IP'
+  connectErr.textContent = `无法连接到 ws://${ip}:${BRIDGE_PORT}`
+  ipInput.value = ip === DEFAULT_IP ? '' : ip
+  ipRow.classList.add('visible')
+  btnConnect.classList.add('visible')
+  setTimeout(() => ipInput.focus(), 50)
+}
+
+function connectToBridge(ip) {
+  const url = `ws://${ip}:${BRIDGE_PORT}`
+  showConnecting(`正在连接 ${ip}…`)
+  ws?.close()
+
+  try { ws = new WebSocket(url) } catch(e) { showConnectFailed(ip); return }
+
+  const failTimer = setTimeout(() => {
+    ws.close()
+    showConnectFailed(ip)
+  }, 5000)
 
   ws.onopen = () => {
-    localStorage.setItem(LS_URL_KEY, url)
+    clearTimeout(failTimer)
+    localStorage.setItem(LS_IP_KEY, ip)
     overlay.classList.add('hidden')
     statusDot.className = 'connected'
   }
 
   ws.onmessage = e => handleServerMsg(JSON.parse(e.data))
 
-  ws.onerror = () => { connectErr.textContent = '连接失败，请检查地址和网络' }
+  ws.onerror = () => {
+    clearTimeout(failTimer)
+    showConnectFailed(ip)
+  }
+
   ws.onclose = () => {
+    clearTimeout(failTimer)
     statusDot.className = ''
-    if (!overlay.classList.contains('hidden')) return // already showing
-    // Brief delay before showing connect overlay again
-    setTimeout(() => overlay.classList.remove('hidden'), 800)
+    if (overlay.classList.contains('hidden')) {
+      overlay.classList.remove('hidden')
+      // Try auto-reconnect once
+      const lastIp = localStorage.getItem(LS_IP_KEY) || DEFAULT_IP
+      setTimeout(() => connectToBridge(lastIp), 2000)
+    }
   }
 }
 
 btnDisconn.addEventListener('click', () => {
   ws?.close()
+  showConnectFailed(localStorage.getItem(LS_IP_KEY) || DEFAULT_IP)
   overlay.classList.remove('hidden')
 })
 
