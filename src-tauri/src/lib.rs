@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use uuid::Uuid;
@@ -553,6 +553,52 @@ fn start_ws_server(registry: Registry, app: AppHandle) {
     });
 }
 
+// ─── opencode-bridge auto-start ───────────────────────────────────────────────
+
+fn start_bridge(app_dir: &std::path::Path) {
+    // Walk up from app_dir looking for opencode-bridge/src/index.ts
+    let mut dir = Some(app_dir.to_path_buf());
+    let mut bridge_script: Option<std::path::PathBuf> = None;
+    for _ in 0..4 {
+        if let Some(ref d) = dir {
+            let candidate = d.join("opencode-bridge").join("src").join("index.ts");
+            if candidate.exists() {
+                bridge_script = Some(candidate);
+                break;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+
+    let Some(bridge_path) = bridge_script else {
+        eprintln!("[bridge] opencode-bridge/src/index.ts not found — skipping auto-start");
+        return;
+    };
+
+    // bridge_dir = the opencode-bridge directory (parent of src/)
+    let bridge_dir = bridge_path
+        .parent().and_then(|p: &std::path::Path| p.parent())
+        .map(|p: &std::path::Path| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    println!("[bridge] starting bridge from {}", bridge_dir.display());
+
+    let result = std::process::Command::new("node")
+        .args([
+            "--experimental-strip-types",
+            bridge_path.to_str().unwrap_or(""),
+            "--port", "9001",
+            "--dir", bridge_dir.to_str().unwrap_or("."),
+        ])
+        .current_dir(&bridge_dir)
+        .spawn();
+
+    match result {
+        Ok(child) => println!("[bridge] started with PID {}", child.id()),
+        Err(e)    => eprintln!("[bridge] failed to start: {e}"),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -564,6 +610,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState { registry: Arc::clone(&registry) })
         .setup(move |app| {
+            // Auto-start opencode-bridge on port 9001
+            if let Ok(res_dir) = app.path().resource_dir() {
+                start_bridge(&res_dir);
+            } else {
+                // Fallback: use exe directory
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(exe_dir) = exe.parent() {
+                        start_bridge(exe_dir);
+                    }
+                }
+            }
             start_ws_server(registry, app.handle().clone());
             Ok(())
         })
