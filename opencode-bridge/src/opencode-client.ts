@@ -27,6 +27,10 @@ export class OpenCodeClient {
     return res.json() as Promise<T>
   }
 
+  async getMessages(sessionId: string): Promise<any[]> {
+    return this.request('GET', `/session/${sessionId}/message`)
+  }
+
   async listSessions(): Promise<SessionInfo[]> {
     const raw: any[] = await this.request('GET', '/session')
     return raw.map(s => ({

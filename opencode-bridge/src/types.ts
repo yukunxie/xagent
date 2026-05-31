@@ -18,6 +18,7 @@ export type ServerMessage =
   | { type: 'session.updated';  session_id: string; title?: string }
   | { type: 'session.status';   session_id: string; status: 'idle' | 'busy' | 'retry'; retry_msg?: string }
   | { type: 'session.error';    session_id: string; error: string }
+  | { type: 'session.history';  session_id: string; messages: HistoryMessage[] }
 
   // Text streaming (high-frequency delta events)
   | { type: 'text.delta';  session_id: string; message_id: string; part_id: string; delta: string }
@@ -56,10 +57,24 @@ export type ClientMessage =
   | { type: 'session.create'; directory?: string }
   // Send a prompt to a session
   | { type: 'session.prompt'; session_id: string; text: string }
+  // Request full message history for a session
+  | { type: 'session.history'; session_id: string }
   // Reply to a permission request
   | { type: 'permission.reply'; id: string; reply: 'once' | 'always' | 'reject' }
   // Abort a running session
   | { type: 'session.abort'; session_id: string }
+
+// ─── History types ─────────────────────────────────────────────────────────────
+
+export interface HistoryMessage {
+  id: string
+  role: 'user' | 'assistant'
+  parts: HistoryPart[]
+}
+
+export type HistoryPart =
+  | { type: 'text';      id: string; text: string }
+  | { type: 'tool';      id: string; tool: string; call_id: string; input: Record<string, unknown>; title: string; output?: string; error?: string; status: 'pending' | 'running' | 'completed' | 'error' }
 
 // ─── opencode domain types (subset we care about) ─────────────────────────────
 

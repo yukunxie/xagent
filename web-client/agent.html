@@ -329,8 +329,15 @@ function switchSession(sid) {
   chat.innerHTML = ''
   liveText.clear()
   liveReason.clear()
+  toolCards.clear()
   renderSessionBar()
-  // TODO: request history from bridge (not yet implemented)
+  // Show loading indicator then request history
+  const loading = document.createElement('div')
+  loading.id = 'history-loading'
+  loading.style.cssText = 'text-align:center;color:var(--muted);font-size:13px;padding:20px'
+  loading.textContent = '加载历史消息…'
+  chat.appendChild(loading)
+  sendMsg({ type: 'session.history', session_id: sid })
 }
 
 // ── Server messages ───────────────────────────────────────────────────────────
@@ -346,6 +353,15 @@ function handleServerMsg(msg) {
         currentSid = msg.sessions[msg.sessions.length - 1].id
       }
       renderSessionBar()
+      if (currentSid) {
+        chat.innerHTML = ''
+        const loading = document.createElement('div')
+        loading.id = 'history-loading'
+        loading.style.cssText = 'text-align:center;color:var(--muted);font-size:13px;padding:20px'
+        loading.textContent = '加载历史消息…'
+        chat.appendChild(loading)
+        sendMsg({ type: 'session.history', session_id: currentSid })
+      }
       break
     }
 
@@ -377,6 +393,13 @@ function handleServerMsg(msg) {
     case 'session.error': {
       if (msg.session_id !== currentSid) break
       appendError(msg.error)
+      break
+    }
+
+    case 'session.history': {
+      if (msg.session_id !== currentSid) break
+      document.getElementById('history-loading')?.remove()
+      renderHistory(msg.messages)
       break
     }
 
@@ -427,6 +450,39 @@ function handleServerMsg(msg) {
 }
 
 // ── Chat rendering ────────────────────────────────────────────────────────────
+
+function renderHistory(messages) {
+  if (!messages || messages.length === 0) {
+    const empty = document.createElement('div')
+    empty.style.cssText = 'text-align:center;color:var(--muted);font-size:13px;padding:40px 20px'
+    empty.textContent = '暂无消息，发送消息开始对话'
+    chat.appendChild(empty)
+    return
+  }
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      const text = msg.parts.filter(p => p.type === 'text').map(p => p.text).join('')
+      if (text) appendUserBubble(text)
+    } else {
+      for (const part of msg.parts) {
+        if (part.type === 'text' && part.text) {
+          const div = document.createElement('div')
+          div.className = 'msg assistant'
+          const bubble = document.createElement('div')
+          bubble.className = 'bubble'
+          bubble.textContent = part.text
+          div.appendChild(bubble)
+          chat.appendChild(div)
+        } else if (part.type === 'tool') {
+          const statusMap = { pending: 'tool.pending', running: 'tool.running', completed: 'tool.done', error: 'tool.error' }
+          upsertToolCard({ type: statusMap[part.status] ?? 'tool.done', part_id: part.id, tool: part.tool, title: part.title, input: part.input, output: part.output, error: part.error })
+        }
+      }
+    }
+  }
+  scrollBottom()
+}
+
 function appendUserBubble(text) {
   const div = document.createElement('div')
   div.className = 'msg user'

@@ -2,7 +2,7 @@
 // Maintains session state map and routes structured events to connected clients.
 
 import { WebSocketServer, WebSocket } from 'ws'
-import type { ServerMessage, ClientMessage, SessionInfo } from './types.ts'
+import type { ServerMessage, ClientMessage, SessionInfo, HistoryMessage, HistoryPart } from './types.ts'
 import { OpenCodeClient } from './opencode-client.ts'
 
 export class Bridge {
@@ -98,6 +98,13 @@ export class Bridge {
 
         case 'session.abort': {
           await this.opencode.abort(msg.session_id)
+          break
+        }
+
+        case 'session.history': {
+          const raw = await this.opencode.getMessages(msg.session_id)
+          const messages = this.formatHistory(raw)
+          this.send(ws, { type: 'session.history', session_id: msg.session_id, messages })
           break
         }
       }
@@ -258,6 +265,38 @@ export class Bridge {
       cost: info.cost,
       tokens: info.tokens ? { input: info.tokens.input, output: info.tokens.output } : undefined,
     }
+  }
+
+  private formatHistory(raw: any[]): HistoryMessage[] {
+    if (!Array.isArray(raw)) return []
+    return raw.map(msg => {
+      const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant'
+      const parts: HistoryPart[] = (msg.parts ?? []).flatMap((p: any): HistoryPart[] => {
+        if (p.type === 'text') {
+          const text = typeof p.text === 'string' ? p.text : ''
+          return text ? [{ type: 'text', id: p.id ?? '', text }] : []
+        }
+        if (p.type === 'tool') {
+          const state = p.state ?? {}
+          return [{
+            type: 'tool',
+            id: p.id ?? '',
+            tool: p.tool ?? '',
+            call_id: p.callID ?? '',
+            input: state.input ?? {},
+            title: state.title ?? p.tool ?? '',
+            output: state.output,
+            error: state.error,
+            status: state.status === 'completed' ? 'completed'
+                  : state.status === 'error'     ? 'error'
+                  : state.status === 'running'   ? 'running'
+                  : 'pending',
+          }]
+        }
+        return []
+      })
+      return { id: msg.id ?? '', role, parts }
+    })
   }
 
   private send(ws: WebSocket, msg: ServerMessage) {
